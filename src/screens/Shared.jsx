@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react';
 import { doc, getDoc, updateDoc } from 'firebase/firestore';
 import { db } from '../firebase.js';
-import { useStore, myAlerts, stamp, fmtDate, isClosed, visitsOf, agencyName, ROLE_LABEL } from '../store.jsx';
+import { useStore, myAlerts, stamp, fmtDate, isClosed, visitsOf, agencyName, hasBreakGlass, ROLE_LABEL } from '../store.jsx';
 import { Shell, Intro, Card, Chip, Field, Details, FileRow, Note, Empty, Icon, Modal, useNav } from '../ui.jsx';
 import { logoutUser } from "../logout.js";
 
@@ -40,6 +40,8 @@ export function Timeline({ id }) {
   const closed = isClosed(e);
   const visits = visitsOf(e);
   const lastVisit = visits[visits.length - 1];
+  // Clinic staff outside the clinic network cannot open files unless break-glass access is active.
+  const locked = role === 'staff' && !state.insideNetwork && !hasBreakGlass(state, id);
 
   const request = () => {
     dispatch({ type: 'requestUpdate', id });
@@ -66,7 +68,7 @@ export function Timeline({ id }) {
               ]}
             />
             <div style={{ marginTop: 16 }}>
-              <FileRow label="Referral letter" file={e.referral} />
+              <FileRow label="Referral letter" file={e.referral} locked={locked} />
             </div>
           </Card>
 
@@ -112,13 +114,13 @@ export function Timeline({ id }) {
                 </small>
                 {t.kind === 'visit' && (
                   <div className="files">
-                    <FileRow label="Medical report" file={t.report} />
+                    <FileRow label="Medical report" file={t.report} locked={locked} />
                     {!t.billing && <small>Billing statement for this visit to follow.</small>}
                   </div>
                 )}
                 {t.kind === 'billing' && (
                   <div className="files">
-                    <FileRow label="Billing statement" file={t.file} />
+                    <FileRow label="Billing statement" file={t.file} locked={locked} />
                   </div>
                 )}
               </li>

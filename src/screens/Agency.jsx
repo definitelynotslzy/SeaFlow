@@ -4,6 +4,7 @@ import { useStore, IN_PROGRESS, CLOSED, isClosed, refOf, stamp, visitsOf } from 
 import { Shell, Intro, Card, Chip, Field, Select, FilePick, Table, Stat, Empty, Note, Icon, useNav } from '../ui.jsx';
 import { Person } from './Shared.jsx';
 import { createEndorsement } from "../endorsementService.js";
+import { emailError, mobileError } from '../validation.js';
 
 
 function useMine() {
@@ -216,14 +217,6 @@ const BLANK = {
   name: '', birthday: '', age: '', address: '', email: '', contact: '',
   position: '', vessel: '', repatriation: '', case: '', visitDate: '', referral: '', confirm: false,
 };
-const demoDetails = () => ({
-  name: 'Juan Dela Cruz', birthday: '1994-03-12', age: '32', address: '123 Taft Ave., Malate, Manila',
-  email: 'juan.delacruz@mail.demo', contact: '0917 000 0142', position: '3rd Officer',
-  vessel: 'MV Pacific Star', repatriation: today(), case: 'Fractured wrist',
-  visitDate: new Date(Date.now() + 24 * 3600e3).toISOString().slice(0, 10),
-  referral: 'Referral_Letter_Demo.pdf', confirm: true,
-});
-
 function ageFrom(birthday) {
   if (!birthday) return '';
   const d = new Date(birthday);
@@ -249,6 +242,14 @@ export function NewEndorsement() {
     if (k === 'birthday') next.age = ageFrom(value); // age follows the birthday
     if (k === 'name' || k === 'vessel') setDupWarned(false);
     setF(next);
+    if (errors[k]) setErrors({ ...errors, [k]: undefined }); // editing a field clears its error
+  };
+
+  // Email and contact number are checked as soon as the user leaves the field.
+  const CHECK_ON_BLUR = { email: emailError, contact: mobileError };
+  const blur = (k) => () => {
+    const check = CHECK_ON_BLUR[k];
+    if (check && String(f[k]).trim()) setErrors({ ...errors, [k]: check(f[k]) || undefined });
   };
 
 
@@ -269,11 +270,13 @@ const submit = async (ev) => {
     }
   });
 
-  if (
-    f.email &&
-    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.email)
-  ) {
-    e.email = "Enter a valid email address.";
+  // Incomplete email addresses and contact numbers are rejected (see validation.js).
+  if (f.email.trim() && emailError(f.email)) {
+    e.email = emailError(f.email);
+  }
+
+  if (f.contact.trim() && mobileError(f.contact)) {
+    e.contact = mobileError(f.contact);
   }
 
   if (f.visitDate && f.visitDate < today()) {
@@ -340,17 +343,13 @@ const submit = async (ev) => {
 
   const input = (k, label, placeholder, type = 'text', hint) => (
     <Field label={`${label} *`} error={errors[k]} hint={hint}>
-      <input type={type} value={f[k]} placeholder={placeholder} onChange={set(k)} />
+      <input type={type} value={f[k]} placeholder={placeholder} onChange={set(k)} onBlur={blur(k)} />
     </Field>
   );
 
   return (
     <Shell title="New endorsement" back tab="m.list">
-      <Intro title="Endorse a seafarer" sub="Fields marked * are required. Share coordination details only.">
-        <button type="button" className="btn" onClick={() => { setF(demoDetails()); setErrors({}); setDupWarned(false); }}>
-          Fill demo details
-        </button>
-      </Intro>
+      <Intro title="Endorse a seafarer" sub="Fields marked * are required. Share coordination details only." />
       <form className="stack" onSubmit={submit} noValidate>
         {dupWarned && (
           <Note tone="amber" icon="alert" title="Possible duplicate">
