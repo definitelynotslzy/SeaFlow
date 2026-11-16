@@ -1,107 +1,68 @@
 // Signed-out screens: sign in, agency registration, agency password reset.
 import { useState } from 'react';
-import { useStore, ROLE_LABEL, DEMO_PASSWORD } from '../store.jsx';
+import { useStore } from '../store.jsx';
 import { Shell, Field, Select, Note, Icon, useNav } from '../ui.jsx';
 import { loginClinicUser } from "../adminAuth.js";
 import { createAgencyRequest } from "../createAgencyRequest.js";
 import { loginAgency } from "../agencyAuth.js";
 
-const DEMO_USER = { agency: 'agency.demo', staff: 'staff.demo', admin: 'admin.demo' };
-
 export function SignIn() {
   const { state, dispatch } = useStore();
   const { nav } = useNav();
-  const [role, setRole] = useState('agency');
-const [username, setUsername] = useState('');
-const [password, setPassword] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [show, setShow] = useState(false);
   const [error, setError] = useState('');
-  const [roleWarning, setRoleWarning] = useState('');
 
-  // Changing the role keeps a typed username. Only the untouched demo
-  // username is swapped for the matching demo account, for convenience.
-  const changeRole = (r) => {
-    setRole(r);
-    if (Object.values(DEMO_USER).includes(username.trim())) {
-      setUsername(DEMO_USER[r]);
-      setPassword('');
-    }
+  // There is no account type picker. The system works out who is signing in:
+  // it checks clinic accounts (admin and staff) first, then manning agencies.
+  const submit = async (ev) => {
+    ev.preventDefault();
     setError('');
-    setRoleWarning('');
-  };
 
+    const u = username.trim();
+    if (!u) return setError('Enter your username.');
 
-
-const submit = async (ev) => {
-  ev.preventDefault();
-  setError("");
-  setRoleWarning("");
-
-  const u = username.trim();
-  if (!u) return setError("Enter your username.");
-
-  if (role === "admin" || role === "staff") {
+    let clinicError;
     try {
       const session = await loginClinicUser(u, password);
-
-      if (session.role !== role) {
-        throw new Error(
-          "This account does not belong to the selected account type."
-        );
-      }
-
-      dispatch({ type: "login", session });
-    } catch (error) {
-      console.error("Clinic login error:", error);
-      setError(
-        error.code === "auth/invalid-credential"
-          ? "Invalid username or password."
-          : error.message || "Login failed."
-      );
+      dispatch({ type: 'login', session });
+      return;
+    } catch (err) {
+      clinicError = err;
     }
-    return;
-  }
 
-  // Manning Agency Firebase login
-  try {
-    const session = await loginAgency(u, password);
+    // These two mean the account exists but is not a clinic account, so try agencies.
+    const notClinicAccount =
+      clinicError.message === 'Account profile not found.' ||
+      clinicError.message === 'Account is not authorized.';
 
-    dispatch({
-      type: "login",
-      session
-    });
+    if (notClinicAccount) {
+      try {
+        const session = await loginAgency(u, password);
+        dispatch({ type: 'login', session });
+        return;
+      } catch (err) {
+        // "Agency registration not found." means it was never an agency either,
+        // so the clinic message (for example a deactivated account) is the useful one.
+        if (err.message !== 'Agency registration not found.') clinicError = err;
+      }
+    }
 
-  } catch (error) {
-    console.error("Agency login failed:", error);
-
+    console.error('Sign-in failed:', clinicError);
     setError(
-      error.code === "auth/invalid-credential"
-        ? "Invalid username or password."
-        : error.message || "Unable to sign in."
+      clinicError.code === 'auth/invalid-credential'
+        ? 'Invalid username or password.'
+        : clinicError.message || 'Unable to sign in.'
     );
-  }
-
-};
-
-
-  const usernameBad = roleWarning || (error && !error.startsWith('Incorrect password'));
+  };
 
   return (
     <Shell title="Sign in">
       <h2>Welcome back to SeaFlow</h2>
-      <p className="lead">Select your account type and enter your credentials to continue.</p>
+      <p className="lead">Enter your username and password to continue.</p>
       <form className="form" onSubmit={submit} noValidate>
-        <Field label="Account type" error={roleWarning && ' '}>
-          <Select
-            value={role}
-            onChange={changeRole}
-            options={Object.entries(ROLE_LABEL).map(([value, label]) => ({ value, label }))}
-          />
-        </Field>
-        {roleWarning && (
-          <Note tone="amber" icon="alert" title="No account of this type">{roleWarning}</Note>
-        )}
-        <Field label="Username" error={usernameBad && ' '}>
+        <Field label="Username" error={error && ' '}>
           <input type="text" value={username} autoCapitalize="none" autoComplete="username" onChange={(ev) => setUsername(ev.target.value)} />
         </Field>
         <Field label="Password" error={error && ' '}>
@@ -111,7 +72,7 @@ const submit = async (ev) => {
           <button type="button" className="link" onClick={() => setShow(!show)}>
             {show ? 'Hide' : 'Show'} password
           </button>
-          <button type="button" className="link" onClick={() => nav('g.forgot', { role, username: username.trim() })}>
+          <button type="button" className="link" onClick={() => nav('g.forgot', { role: 'agency', username: username.trim() })}>
             Forgot password?
           </button>
         </div>
@@ -122,11 +83,6 @@ const submit = async (ev) => {
       <div className="auth-alt">
         <span>New manning agency?</span>
         <button type="button" className="btn block" onClick={() => nav('g.request')}>Request an agency account</button>
-      </div>
-
-      <div className="auth-demo">
-        <b>Demo accounts</b>
-        agency.demo, staff.demo, billing.demo, updates.demo, admin.demo. Password: {DEMO_PASSWORD}
       </div>
       <p className="hint">
         You are signed out automatically after {state.policy.autoLogoutMinutes} minutes of inactivity.
@@ -331,7 +287,7 @@ export function ForgotPassword({ role = 'agency', username: initial = '' }) {
 
   const sendCode = (ev) => {
     ev.preventDefault();
-    if (!agency) return setError('No manning agency account uses that username.');
+    if (!agency) return setError('No manning agency account uses that username. Clinic staff and admin should ask the clinic admin to reset their password.');
     // Demo only: a real system sends this by email or SMS and never shows it on screen.
     const fresh = String(Math.floor(100000 + Math.random() * 900000));
     setSent({

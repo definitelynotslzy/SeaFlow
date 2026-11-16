@@ -100,13 +100,6 @@ function Brand({ className = 'brand', sub, size }) {
   );
 }
 
-// How the three kinds of users work together, shown on the sign-in panel.
-const WORKFLOW = [
-  { icon: 'file', title: 'Endorsement', text: 'Manning agencies submit and monitor seafarer referrals.' },
-  { icon: 'pulse', title: 'Medical processing', text: 'Clinic staff record clinic visits, manage medical assessments and update patient statuses.' },
-  { icon: 'receipt', title: 'Reports and billing', text: 'Medical reports and billing statements are managed and shared through the platform.' },
-];
-
 /**
  * Page frame.
  * Signed in: sidebar (bottom tabs on phones) + top bar + scrolling content.
@@ -139,24 +132,6 @@ const handleLogout = async () => {
           </svg>
           <div className="auth-art-in">
             <Brand size="lg" sub="NGC Medical Specialists Clinic" />
-            <div className="auth-pitch">
-              <h2>From endorsement to fit-to-work, all in one place.</h2>
-              <p>
-                A centralized platform connecting NGC Medical Specialists Clinic, manning agencies and clinic
-                staff to manage seafarer endorsements, medical visits, reports and billing.
-              </p>
-            </div>
-            <ol className="flow">
-              {WORKFLOW.map((step, i) => (
-                <li key={step.title}>
-                  <span className="flow-icon"><Icon name={step.icon} size={20} /></span>
-                  <div>
-                    <b><span className="flow-no">0{i + 1}</span>{step.title}</b>
-                    <p>{step.text}</p>
-                  </div>
-                </li>
-              ))}
-            </ol>
             <p className="auth-foot">
               <Icon name="lock" size={14} /> Authorized users only. Every access to patient information is logged.
             </p>
