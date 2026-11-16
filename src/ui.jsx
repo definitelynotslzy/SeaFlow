@@ -291,8 +291,17 @@ export function FilePick({ file, onPick, onRemove, empty = 'No file attached', p
 }
 
 /** A stored file with a View action (demo files have nothing to open). */
-export function FileRow({ label, file }) {
+export function FileRow({ label, file, locked }) {
   const { toast } = useNav();
+  // locked: clinic staff outside the clinic network cannot open the file or see its name.
+  if (locked) {
+    return (
+      <div className="filerow">
+        <Icon name="lock" size={16} />
+        <span>{label ? `${label}: ` : ''}restricted outside the clinic network</span>
+      </div>
+    );
+  }
   return (
     <div className="filerow">
       <Icon name="file" size={16} />

@@ -1,4 +1,3 @@
-
 import {
   signInWithEmailAndPassword,
   signOut
@@ -48,6 +47,14 @@ export async function loginAgency(username, password) {
         agency.statusReason
           ? `Your registration was rejected: ${agency.statusReason}`
           : "Your registration was rejected. Contact the clinic."
+      );
+    }
+
+    if (agency.status === "Suspended") {
+      throw new Error(
+        agency.statusReason
+          ? `Your agency account is suspended: ${agency.statusReason}`
+          : "Your agency account is suspended. Contact the clinic."
       );
     }
 

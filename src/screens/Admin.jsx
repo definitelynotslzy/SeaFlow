@@ -409,9 +409,10 @@ const requests = firebaseRequests.filter(
  
 const needle = q.trim().toLowerCase();
 
+// Approved agencies and suspended ones, so a suspended agency stays listed and can be reactivated.
 const list = firebaseRequests.filter(
   (a) =>
-    a.status === "Approved" &&
+    (a.status === "Approved" || a.status === "Suspended") &&
     (!needle || a.name.toLowerCase().includes(needle))
 );
 
@@ -420,11 +421,39 @@ const total = (id) =>
     (e) => e.agencyId === id
   ).length;
 
-  const suspend = () => {
-    if (!reason.trim()) return setError('Give a reason for suspending this agency.');
-    dispatch({ type: 'agencyStatus', id: suspending.id, status: 'Suspended', verb: 'suspended', reason: reason.trim() });
-    return setSuspending(null);
+  const [saving, setSaving] = useState(false);
+  const { toast } = useNav();
+
+  // Agencies live in Firestore, so the status is saved there. The list above
+  // listens to Firestore and updates by itself once the change is saved.
+  const saveStatus = async (agency, status, verb, why = '') => {
+    if (saving) return false;
+    setSaving(true);
+    try {
+      await updateDoc(doc(db, 'agencyRequests', agency.id), { status, statusReason: why });
+      dispatch({ type: 'agencyStatus', id: agency.id, name: agency.name, status, verb, reason: why }); // audit log entry
+      toast(`${agency.name} ${verb}`);
+      return true;
+    } catch (err) {
+      console.error(`Agency could not be ${verb}:`, err);
+      const message = err.code === 'permission-denied'
+        ? 'Permission denied. Check that your admin account may update agencies in the Firestore rules.'
+        : err.message || 'Unable to save the change.';
+      setError(message);
+      toast(message);
+      return false;
+    } finally {
+      setSaving(false);
+    }
   };
+
+  const suspend = async () => {
+    if (!reason.trim()) return setError('Give a reason for suspending this agency.');
+    if (await saveStatus(suspending, 'Suspended', 'suspended', reason.trim())) setSuspending(null);
+    return undefined;
+  };
+
+  const reactivate = (agency) => saveStatus(agency, 'Approved', 'reactivated');
 
   return (
     <>
@@ -459,10 +488,10 @@ const total = (id) =>
               cell: (a) => (
                 <div className="actions">
                   <button className="btn sm" onClick={() => nav('a.agency', { id: a.id })}>View details</button>
-                  {a.status === 'Active' ? (
+                  {a.status === 'Approved' ? (
                     <button className="btn sm danger" onClick={() => { setSuspending(a); setReason(''); setError(''); }}>Suspend</button>
                   ) : (
-                    <button className="btn sm" onClick={() => dispatch({ type: 'agencyStatus', id: a.id, status: 'Active', verb: 'reactivated' })}>
+                    <button className="btn sm" disabled={saving} onClick={() => reactivate(a)}>
                       Reactivate
                     </button>
                   )}

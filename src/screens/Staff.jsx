@@ -57,7 +57,7 @@ function useListFilter(list, extra) {
   const ui = (
     <div className="toolbar">
       <Field label="Search" className="grow">
-        <input type="search" value={q} placeholder="Search name, reference, agency, ship or position" onChange={(ev) => setQ(ev.target.value)} />
+        <input type="search" value={q} placeholder="Search name, patient code, agency, ship or position" onChange={(ev) => setQ(ev.target.value)} />
       </Field>
       {extra}
       <Field label="Agency">
@@ -229,13 +229,13 @@ const accept = async (e, cash) => {
               compact
               cols
               items={[
-                ['Reference', e.ref],
+                ['Patient Code', e.ref],
                 ['Received', stamp(e.receivedMs)],
                 ['Can come to the clinic', fmtDate(e.visitDate)],
                 ['Case', e.case],
               ]}
             />
-            <FileRow label="Referral letter" file={e.referral} />
+            <FileRow label="Referral letter" file={e.referral} locked={!state.insideNetwork && !hasBreakGlass(state, e.ref)} />
             <div className="rec-f">
               <button
   className="btn primary sm"
@@ -384,7 +384,7 @@ const active = state.endorsements
                 compact
                 cols
                 items={[
-                  ['Reference', e.ref],
+                  ['Patient Code', e.ref],
                   ['Received', stamp(e.receivedMs)],
                   ['Clinic visits', last ? String(visits.length) : 'None yet'],
                   [last ? 'Last visit' : 'Expected', last ? stamp(last.ms) : fmtDate(e.visitDate)],
@@ -475,7 +475,7 @@ export function Billing() {
       />
       <div className="toolbar">
         <Field label="Search billing" className="grow">
-          <input type="search" value={q} placeholder="Search patient, reference, agency or vessel" onChange={(ev) => setQ(ev.target.value)} />
+          <input type="search" value={q} placeholder="Search patient, patient code, agency or vessel" onChange={(ev) => setQ(ev.target.value)} />
         </Field>
       </div>
 
@@ -494,7 +494,7 @@ export function Billing() {
             key={`s:${needle}`}
             columns={[
               { head: 'Patient', cell: ({ e }) => <><span className="strong">{e.name}</span><span className="meta">{agencyName(state, e.agencyId)}</span></> },
-              { head: 'Reference', cell: ({ e }) => e.ref, className: 'nowrap' },
+              { head: 'Patient Code', cell: ({ e }) => e.ref, className: 'nowrap' },
               { head: 'Clinic visit', cell: ({ v }) => `Visit ${v.n}, ${v.label}` },
               { head: 'Sent', cell: ({ v }) => stamp(v.billingMs), className: 'nowrap' },
               { head: 'Sent by', cell: ({ v }) => v.billingBy },
@@ -538,7 +538,7 @@ const base = state.endorsements.filter(
           columns={[
             { head: 'Patient', cell: (e) => <Person e={e} /> },
             { head: 'Manning agency', cell: (e) => agencyName(state, e.agencyId) },
-            { head: 'Reference', cell: (e) => e.ref, className: 'nowrap' },
+            { head: 'Patient Code', cell: (e) => e.ref, className: 'nowrap' },
             { head: 'Received', cell: (e) => stamp(e.receivedMs), className: 'nowrap' },
             {
               head: 'Status',

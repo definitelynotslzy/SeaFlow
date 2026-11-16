@@ -494,7 +494,7 @@ case 'logout':
       return {
         ...s,
         agencies: s.agencies.map((g) => (g.id === a.id ? { ...g, status: a.status, statusReason: a.reason || null } : g)),
-        audit: audit(`Agency ${a.verb}`, '—', `${agencyName(s, a.id)}${a.reason ? ` · Reason: ${a.reason}` : ''}`),
+        audit: audit(`Agency ${a.verb}`, '—', `${a.name || agencyName(s, a.id)}${a.reason ? ` · Reason: ${a.reason}` : ''}`),
       };
 
     // The admin creates clinic accounts directly; there is no self-registration for staff.
