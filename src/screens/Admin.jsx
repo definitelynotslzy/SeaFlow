@@ -396,7 +396,7 @@ const activate = async (u) => {
 
 function Agencies() {
   const { state, dispatch } = useStore();
-  const { nav } = useNav();
+  const { nav, toast } = useNav();
   const [q, setQ] = useState('');
   const [suspending, setSuspending] = useState(null);
   const [reason, setReason] = useState('');
@@ -411,7 +411,7 @@ const needle = q.trim().toLowerCase();
 
 const list = firebaseRequests.filter(
   (a) =>
-    a.status === "Approved" &&
+    ["Approved", "Suspended"].includes(a.status) &&
     (!needle || a.name.toLowerCase().includes(needle))
 );
 
@@ -420,10 +420,35 @@ const total = (id) =>
     (e) => e.agencyId === id
   ).length;
 
-  const suspend = () => {
+  // Saves the agency's status to Firestore (agencyRequests), then records it in the audit log.
+  const changeStatus = async (agency, status, statusReason, verb) => {
+    await updateDoc(doc(db, 'agencyRequests', agency.id), { status, statusReason });
+    dispatch({
+      type: 'auditNote',
+      action: `Agency ${verb}`,
+      note: `${agency.name}${statusReason ? ` · Reason: ${statusReason}` : ''}`,
+    });
+    toast(`${agency.name} ${verb}`);
+  };
+
+  const suspend = async () => {
     if (!reason.trim()) return setError('Give a reason for suspending this agency.');
-    dispatch({ type: 'agencyStatus', id: suspending.id, status: 'Suspended', verb: 'suspended', reason: reason.trim() });
-    return setSuspending(null);
+    try {
+      await changeStatus(suspending, 'Suspended', reason.trim(), 'suspended');
+      setSuspending(null);
+    } catch (err) {
+      console.error('Suspend agency failed:', err);
+      setError(err.message || 'Unable to suspend this agency.');
+    }
+  };
+
+  const reactivate = async (agency) => {
+    try {
+      await changeStatus(agency, 'Approved', null, 'reactivated');
+    } catch (err) {
+      console.error('Reactivate agency failed:', err);
+      toast('Unable to reactivate this agency.');
+    }
   };
 
   return (
@@ -459,10 +484,10 @@ const total = (id) =>
               cell: (a) => (
                 <div className="actions">
                   <button className="btn sm" onClick={() => nav('a.agency', { id: a.id })}>View details</button>
-                  {a.status === 'Active' ? (
+                  {a.status === 'Approved' ? (
                     <button className="btn sm danger" onClick={() => { setSuspending(a); setReason(''); setError(''); }}>Suspend</button>
                   ) : (
-                    <button className="btn sm" onClick={() => dispatch({ type: 'agencyStatus', id: a.id, status: 'Active', verb: 'reactivated' })}>
+                    <button className="btn sm" onClick={() => reactivate(a)}>
                       Reactivate
                     </button>
                   )}
@@ -934,7 +959,7 @@ export function BreakGlassReview({ id }) {
 const ACTION_TONE = {
   'Accepted endorsement': 'green', 'Created account': 'green', 'Activated account': 'green',
   'Break-glass': 'red', 'Flagged break-glass': 'red', 'Deactivated account': 'red',
-  'Agency suspended': 'red', 'Agency rejected': 'red',
+  'Agency suspended': 'red', 'Agency rejected': 'red', 'Agency reactivated': 'green',
   'Submitted medical report': 'teal', 'Submitted billing statement': 'teal',
   'Signed in': 'slate', 'Viewed record': 'slate',
 };
@@ -952,7 +977,7 @@ export function AuditLog() {
     (x) =>
       (!who || x.who === who) &&
       (!action || x.action === action) &&
-      (!needle || `${x.ref} ${x.note || ''}`.toLowerCase().includes(needle)),
+      (!needle || `PT-${x.ref} ${x.note || ''}`.toLowerCase().includes(needle)),
   );
 
   return (
@@ -963,7 +988,7 @@ export function AuditLog() {
       />
       <div className="toolbar">
         <Field label="Search" className="grow">
-          <input type="search" value={q} placeholder="Search reference, patient or file name" onChange={(ev) => setQ(ev.target.value)} />
+          <input type="search" value={q} placeholder="Search patient code, patient or file name" onChange={(ev) => setQ(ev.target.value)} />
         </Field>
         <Field label="Clinic user">
           <Select searchable clearable value={who} onChange={setWho} options={[{ value: '', label: 'All clinic users' }, ...people]} />
@@ -980,7 +1005,7 @@ export function AuditLog() {
             { head: 'When', cell: (x) => stamp(x.ms), className: 'nowrap' },
             { head: 'Clinic user', cell: (x) => <><span className="strong">{x.who}</span><span className="meta">{x.role}</span></> },
             { head: 'Action', cell: (x) => <Chip tone={ACTION_TONE[x.action] || 'amber'}>{x.action}</Chip> },
-            { head: 'Reference', cell: (x) => (x.ref === '—' ? <span className="meta">None</span> : x.ref), className: 'nowrap' },
+            { head: 'Patient Code', cell: (x) => (!x.ref || x.ref === '—' ? <span className="meta">None</span> : `PT-${x.ref}`), className: 'nowrap' },
             {
               head: 'Details',
               cell: (x) => (x.note

@@ -8,6 +8,7 @@ import {
   IN_PROGRESS,
   UPDATE_STATUSES,
   agencyName,
+  patientCodeOf,
   dayOf,
   stamp,
   fmtDate,
@@ -52,12 +53,12 @@ function useListFilter(list, extra) {
       (!agency || e.agencyId === agency) &&
       (!day || dayOf(e.receivedMs) === day) &&
       (!needle ||
-        `${e.name} ${e.ref} ${e.vessel} ${e.position} ${agencyName(state, e.agencyId)}`.toLowerCase().includes(needle)),
+        `${e.name} ${e.ref} ${patientCodeOf(e)} ${e.vessel} ${e.position} ${agencyName(state, e.agencyId)}`.toLowerCase().includes(needle)),
   );
   const ui = (
     <div className="toolbar">
       <Field label="Search" className="grow">
-        <input type="search" value={q} placeholder="Search name, reference, agency, ship or position" onChange={(ev) => setQ(ev.target.value)} />
+        <input type="search" value={q} placeholder="Search name, patient code, agency, ship or position" onChange={(ev) => setQ(ev.target.value)} />
       </Field>
       {extra}
       <Field label="Agency">
@@ -229,7 +230,7 @@ const accept = async (e, cash) => {
               compact
               cols
               items={[
-                ['Reference', e.ref],
+                ['Patient Code', patientCodeOf(e)],
                 ['Received', stamp(e.receivedMs)],
                 ['Can come to the clinic', fmtDate(e.visitDate)],
                 ['Case', e.case],
@@ -260,7 +261,7 @@ const accept = async (e, cash) => {
       {cashFor && (
         <Modal
           title={`Accept ${cashFor.name} on a cash basis?`}
-          sub={`${cashFor.ref}, ${agencyName(state, cashFor.agencyId)}`}
+          sub={`${patientCodeOf(cashFor)}, ${agencyName(state, cashFor.agencyId)}`}
           onClose={() => setCashFor(null)}
           footer={(
             <>
@@ -307,7 +308,7 @@ function VisitDialog({ e, onClose }) {
   return (
     <Modal
       title={`Clinic visit ${next}`}
-      sub={`${e.name}, ${e.ref}`}
+      sub={`${e.name}, ${patientCodeOf(e)}`}
       onClose={onClose}
       footer={(
         <>
@@ -384,7 +385,7 @@ const active = state.endorsements
                 compact
                 cols
                 items={[
-                  ['Reference', e.ref],
+                  ['Patient Code', patientCodeOf(e)],
                   ['Received', stamp(e.receivedMs)],
                   ['Clinic visits', last ? String(visits.length) : 'None yet'],
                   [last ? 'Last visit' : 'Expected', last ? stamp(last.ms) : fmtDate(e.visitDate)],
@@ -426,7 +427,7 @@ function BillingCard({ e, v }) {
         <div>
           <div className="card-name">{e.name}</div>
           <div className="meta">{agencyName(state, e.agencyId)}</div>
-          <div className="meta">{e.ref} · Clinic visit {v.n} · {v.label}</div>
+          <div className="meta">{patientCodeOf(e)} · Clinic visit {v.n} · {v.label}</div>
         </div>
         <div className="chips">
           {e.cashBasis && <Chip>Cash basis</Chip>}
@@ -462,7 +463,7 @@ export function Billing() {
   const items = billingItems(state).filter(
     ({ e, v }) =>
       !needle ||
-      `${e.name} ${e.ref} ${e.vessel} ${agencyName(state, e.agencyId)} ${v.billing || ''}`.toLowerCase().includes(needle),
+      `${e.name} ${e.ref} ${patientCodeOf(e)} ${e.vessel} ${agencyName(state, e.agencyId)} ${v.billing || ''}`.toLowerCase().includes(needle),
   );
   const toSend = items.filter((i) => !i.v.billing).sort((a, b) => a.v.ms - b.v.ms); // oldest visit first
   const sent = items.filter((i) => i.v.billing).sort((a, b) => b.v.billingMs - a.v.billingMs);
@@ -475,7 +476,7 @@ export function Billing() {
       />
       <div className="toolbar">
         <Field label="Search billing" className="grow">
-          <input type="search" value={q} placeholder="Search patient, reference, agency or vessel" onChange={(ev) => setQ(ev.target.value)} />
+          <input type="search" value={q} placeholder="Search patient, patient code, agency or vessel" onChange={(ev) => setQ(ev.target.value)} />
         </Field>
       </div>
 
@@ -494,7 +495,7 @@ export function Billing() {
             key={`s:${needle}`}
             columns={[
               { head: 'Patient', cell: ({ e }) => <><span className="strong">{e.name}</span><span className="meta">{agencyName(state, e.agencyId)}</span></> },
-              { head: 'Reference', cell: ({ e }) => e.ref, className: 'nowrap' },
+              { head: 'Patient Code', cell: ({ e }) => patientCodeOf(e), className: 'nowrap' },
               { head: 'Clinic visit', cell: ({ v }) => `Visit ${v.n}, ${v.label}` },
               { head: 'Sent', cell: ({ v }) => stamp(v.billingMs), className: 'nowrap' },
               { head: 'Sent by', cell: ({ v }) => v.billingBy },
@@ -538,7 +539,7 @@ const base = state.endorsements.filter(
           columns={[
             { head: 'Patient', cell: (e) => <Person e={e} /> },
             { head: 'Manning agency', cell: (e) => agencyName(state, e.agencyId) },
-            { head: 'Reference', cell: (e) => e.ref, className: 'nowrap' },
+            { head: 'Patient Code', cell: (e) => patientCodeOf(e), className: 'nowrap' },
             { head: 'Received', cell: (e) => stamp(e.receivedMs), className: 'nowrap' },
             {
               head: 'Status',
@@ -584,7 +585,7 @@ export function PatientOverview({ id }) {
 
   return (
     <Shell title="Patient overview" back tab="s.dash">
-      <Intro title={e.name} sub={`${e.ref}, ${agent}`}>
+      <Intro title={e.name} sub={`${patientCodeOf(e)}, ${agent}`}>
         {!full && (
           <button className="btn primary" onClick={() => nav('s.breakglass', { id })}>
             <Icon name="lock" size={16} /> Request more access
@@ -666,7 +667,7 @@ export function BreakGlass({ id }) {
 
   return (
     <Shell title="Break-glass access" back tab="s.dash">
-      <Intro title="Request full access" sub={`For ${e.name}, ${e.ref}`} />
+      <Intro title="Request full access" sub={`For ${e.name}, ${patientCodeOf(e)}`} />
       <Card className="narrow">
         <div className="form">
           <Note tone="amber" icon="alert" title={`Access lasts ${minutes} minutes`}>

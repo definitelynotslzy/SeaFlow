@@ -49,13 +49,19 @@ function greeting() {
   return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
 }
 
+
 const ENDORSEMENT_COLUMNS = [
   { head: 'Seafarer', cell: (e) => <Person e={e} /> },
-  { head: 'Reference', cell: (e) => e.ref, className: 'nowrap' },
+  {
+    head: 'Patient Code',
+    cell: (e) => e.patientCode || `PT-${e.ref}`,
+    className: 'nowrap'
+  },
   { head: 'Received', cell: (e) => stamp(e.receivedMs), className: 'nowrap' },
   { head: 'Clinic visits', cell: (e) => visitsOf(e).length || 'None yet' },
   { head: 'Status', cell: (e) => <Chip>{e.status}</Chip> },
 ];
+
 
 /** Agency home: counts, recent endorsements, latest billing. */
 export function Home() {
@@ -210,13 +216,6 @@ const BLANK = {
   name: '', birthday: '', age: '', address: '', email: '', contact: '',
   position: '', vessel: '', repatriation: '', case: '', visitDate: '', referral: '', confirm: false,
 };
-const demoDetails = () => ({
-  name: 'Juan Dela Cruz', birthday: '1994-03-12', age: '32', address: '123 Taft Ave., Malate, Manila',
-  email: 'juan.delacruz@mail.demo', contact: '0917 000 0142', position: '3rd Officer',
-  vessel: 'MV Pacific Star', repatriation: today(), case: 'Fractured wrist',
-  visitDate: new Date(Date.now() + 24 * 3600e3).toISOString().slice(0, 10),
-  referral: 'Referral_Letter_Demo.pdf', confirm: true,
-});
 
 function ageFrom(birthday) {
   if (!birthday) return '';
@@ -340,11 +339,7 @@ const submit = async (ev) => {
 
   return (
     <Shell title="New endorsement" back tab="m.list">
-      <Intro title="Endorse a seafarer" sub="Fields marked * are required. Share coordination details only.">
-        <button type="button" className="btn" onClick={() => { setF(demoDetails()); setErrors({}); setDupWarned(false); }}>
-          Fill demo details
-        </button>
-      </Intro>
+      <Intro title="Endorse a seafarer" sub="Fields marked * are required. Share coordination details only." />
       <form className="stack" onSubmit={submit} noValidate>
         {dupWarned && (
           <Note tone="amber" icon="alert" title="Possible duplicate">
@@ -427,19 +422,40 @@ const submit = async (ev) => {
 }
 
 /** Confirmation after submitting an endorsement. */
+
 export function Submitted({ id }) {
   const { nav, reset } = useNav();
+
   return (
     <Shell title="Submitted" tab="m.list">
       <Card className="narrow center">
-        <div className="success-mark"><Icon name="check" size={28} /></div>
+        <div className="success-mark">
+          <Icon name="check" size={28} />
+        </div>
+
         <h2>Endorsement submitted</h2>
-        <p className="meta" style={{ margin: '4px 0 16px' }}>Sent to the clinic review queue.</p>
-        <div className="meta">Reference number</div>
-        <div className="ref">{id}</div>
+
+        <p className="meta" style={{ margin: '4px 0 16px' }}>
+          Sent to the clinic review queue.
+        </p>
+
+        <div className="meta">Patient Code</div>
+        <div className="ref">{`PT-${id}`}</div>
+
         <div className="card-foot" style={{ justifyContent: 'center' }}>
-          <button className="btn primary" onClick={() => nav('timeline', { id })}>View status</button>
-          <button className="btn" onClick={() => reset('m.home')}>Back to home</button>
+          <button
+            className="btn primary"
+            onClick={() => nav('timeline', { id })}
+          >
+            View status
+          </button>
+
+          <button
+            className="btn"
+            onClick={() => reset('m.home')}
+          >
+            Back to home
+          </button>
         </div>
       </Card>
     </Shell>
