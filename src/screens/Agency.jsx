@@ -49,13 +49,19 @@ function greeting() {
   return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
 }
 
+
 const ENDORSEMENT_COLUMNS = [
   { head: 'Seafarer', cell: (e) => <Person e={e} /> },
-  { head: 'Reference', cell: (e) => e.ref, className: 'nowrap' },
+  {
+    head: 'Patient Code',
+    cell: (e) => e.patientCode || `PT-${e.ref}`,
+    className: 'nowrap'
+  },
   { head: 'Received', cell: (e) => stamp(e.receivedMs), className: 'nowrap' },
   { head: 'Clinic visits', cell: (e) => visitsOf(e).length || 'None yet' },
   { head: 'Status', cell: (e) => <Chip>{e.status}</Chip> },
 ];
+
 
 /** Agency home: counts, recent endorsements, latest billing. */
 export function Home() {
@@ -427,19 +433,40 @@ const submit = async (ev) => {
 }
 
 /** Confirmation after submitting an endorsement. */
+
 export function Submitted({ id }) {
   const { nav, reset } = useNav();
+
   return (
     <Shell title="Submitted" tab="m.list">
       <Card className="narrow center">
-        <div className="success-mark"><Icon name="check" size={28} /></div>
+        <div className="success-mark">
+          <Icon name="check" size={28} />
+        </div>
+
         <h2>Endorsement submitted</h2>
-        <p className="meta" style={{ margin: '4px 0 16px' }}>Sent to the clinic review queue.</p>
-        <div className="meta">Reference number</div>
-        <div className="ref">{id}</div>
+
+        <p className="meta" style={{ margin: '4px 0 16px' }}>
+          Sent to the clinic review queue.
+        </p>
+
+        <div className="meta">Patient Code</div>
+        <div className="ref">{`PT-${id}`}</div>
+
         <div className="card-foot" style={{ justifyContent: 'center' }}>
-          <button className="btn primary" onClick={() => nav('timeline', { id })}>View status</button>
-          <button className="btn" onClick={() => reset('m.home')}>Back to home</button>
+          <button
+            className="btn primary"
+            onClick={() => nav('timeline', { id })}
+          >
+            View status
+          </button>
+
+          <button
+            className="btn"
+            onClick={() => reset('m.home')}
+          >
+            Back to home
+          </button>
         </div>
       </Card>
     </Shell>

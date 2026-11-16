@@ -1,8 +1,11 @@
 // Screens used by more than one role: status timeline, alerts, profile.
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { doc, getDoc, updateDoc } from 'firebase/firestore';
+import { db } from '../firebase.js';
 import { useStore, myAlerts, stamp, fmtDate, isClosed, visitsOf, agencyName, ROLE_LABEL } from '../store.jsx';
 import { Shell, Intro, Card, Chip, Field, Details, FileRow, Note, Empty, Icon, Modal, useNav } from '../ui.jsx';
 import { logoutUser } from "../logout.js";
+
 
 /** Seafarer name with position and vessel underneath (first column of most tables). */
 export function Person({ e }) {
@@ -188,52 +191,214 @@ const signOut = async () => {
   );
 }
 
-function AgencyProfile({ onSignOut }) {
-  const { state, dispatch } = useStore();
-  const { toast } = useNav();
-  const a = state.agencies.find((x) => x.id === state.session.agencyId);
-  const [editing, setEditing] = useState(false);
-  const blank = () => ({
-    address: a.address,
-    authContact: a.authorized.contact, authEmail: a.authorized.email,
-    billContact: a.billing.contact, billEmail: a.billing.email,
-  });
-  const [f, setF] = useState(blank);
-  const set = (k) => (ev) => setF({ ...f, [k]: ev.target.value });
 
-  const save = () => {
-    dispatch({
-      type: 'updateAgencyContacts', id: a.id, address: f.address,
-      authorized: { contact: f.authContact, email: f.authEmail },
-      billing: { contact: f.billContact, email: f.billEmail },
-    });
-    setEditing(false);
-    toast('Details updated');
+function AgencyProfile({ onSignOut }) {
+  const { state } = useStore();
+  const { toast } = useNav();
+  const agencyId = state.session?.agencyId;
+
+  const [agency, setAgency] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+
+  const [f, setF] = useState({
+    address: "",
+    authContact: "",
+    authEmail: "",
+    billContact: "",
+    billEmail: "",
+  });
+
+  const blank = (a) => ({
+    address: a?.address || "",
+    authContact: a?.authorized?.contact || "",
+    authEmail: a?.authorized?.email || "",
+    billContact: a?.billing?.contact || "",
+    billEmail: a?.billing?.email || "",
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadProfile() {
+      setLoading(true);
+      setLoadError("");
+      setAgency(null);
+
+      if (!agencyId) {
+        setLoadError("Agency account not found.");
+        setLoading(false);
+        return;
+      }
+
+      try {
+        const snapshot = await getDoc(
+          doc(db, "agencyRequests", agencyId)
+        );
+
+        if (!snapshot.exists()) {
+          throw new Error("Agency profile not found.");
+        }
+
+        if (!cancelled) {
+          setAgency({
+            id: snapshot.id,
+            ...snapshot.data(),
+          });
+        }
+      } catch (error) {
+        console.error("Unable to load agency profile:", error);
+
+        if (!cancelled) {
+          setLoadError(error.message);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    loadProfile();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [agencyId]);
+
+  const set = (k) => (ev) => {
+    setF((prev) => ({
+      ...prev,
+      [k]: ev.target.value,
+    }));
+  };
+
+  const save = async () => {
+    if (!agency || saving) return;
+
+    setSaving(true);
+    setSaveError("");
+
+    try {
+      const changes = {
+        address: f.address.trim(),
+        "authorized.contact": f.authContact.trim(),
+        "authorized.email": f.authEmail.trim(),
+        "billing.contact": f.billContact.trim(),
+        "billing.email": f.billEmail.trim(),
+      };
+
+      await updateDoc(
+        doc(db, "agencyRequests", agencyId),
+        changes
+      );
+
+      const updated = await getDoc(
+        doc(db, "agencyRequests", agencyId)
+      );
+
+      setAgency({
+        id: updated.id,
+        ...updated.data(),
+      });
+
+      setEditing(false);
+      toast("Details updated successfully.");
+    } catch (error) {
+      console.error("Unable to update agency profile:", error);
+      setSaveError(
+        error.message || "Unable to save changes."
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <Shell title="Profile" tab="profile">
+        <Card className="narrow">
+          Loading agency profile...
+        </Card>
+      </Shell>
+    );
+  }
+
+  if (loadError || !agency) {
+    return (
+      <Shell title="Profile" tab="profile">
+        <Card className="narrow">
+          <Note tone="red" icon="alert">
+            {loadError || "Agency profile unavailable."}
+          </Note>
+        </Card>
+      </Shell>
+    );
+  }
+
+  const a = {
+    ...agency,
+    name: agency.agencyName || "Manning Agency",
+    authorized: agency.authorized || {},
+    billing: agency.billing || {},
   };
 
   return (
     <Shell title="Profile" tab="profile">
-      <Intro title={a.name} sub="Manning agency account. To change the agency name or the named persons, contact the clinic.">
-        <button className="btn primary" onClick={() => { setF(blank()); setEditing(true); }}>Edit details</button>
-        <button className="btn" onClick={onSignOut}><Icon name="logout" size={16} /> Sign out</button>
+      <Intro
+        title={a.name}
+        sub="Manning agency account. To change the agency name or the named persons, contact the clinic."
+      >
+        <button
+          className="btn primary"
+          onClick={() => {
+            setF(blank(a));
+            setSaveError("");
+            setEditing(true);
+          }}
+        >
+          Edit details
+        </button>
+
+        <button className="btn" onClick={onSignOut}>
+          <Icon name="logout" size={16} /> Sign out
+        </button>
       </Intro>
+
       <div className="split even">
         <Card title="Agency" action={<Chip>{a.status}</Chip>}>
-          <Details items={[['Agency name', a.name], ['Address', a.address], ['Username', a.username]]} />
+          <Details
+            items={[
+              ["Agency name", a.name],
+              ["Address", a.address],
+              ["Username", a.username],
+            ]}
+          />
         </Card>
+
         <div className="stack">
           <Card title="Authorized person">
             <Details
               cols
-              items={[['Name', a.authorized.name], ['Position', a.authorized.position],
-                ['Contact no.', a.authorized.contact], ['Email address', a.authorized.email]]}
+              items={[
+                ["Name", a.authorized.name],
+                ["Position", a.authorized.position],
+                ["Contact no.", a.authorized.contact],
+                ["Email address", a.authorized.email],
+              ]}
             />
           </Card>
+
           <Card title="In charge of medical report and billing">
             <Details
               cols
-              items={[['Name', a.billing.name], ['Position', a.billing.position],
-                ['Contact no.', a.billing.contact], ['Email address', a.billing.email]]}
+              items={[
+                ["Name", a.billing.name],
+                ["Position", a.billing.position],
+                ["Contact no.", a.billing.contact],
+                ["Email address", a.billing.email],
+              ]}
             />
           </Card>
         </div>
@@ -244,22 +409,80 @@ function AgencyProfile({ onSignOut }) {
           wide
           title="Edit details"
           sub="Contact details the clinic uses to reach your agency."
-          onClose={() => setEditing(false)}
-          footer={(
+          onClose={() => !saving && setEditing(false)}
+          footer={
             <>
-              <button className="btn" onClick={() => setEditing(false)}>Cancel</button>
-              <button className="btn primary" onClick={save}>Save changes</button>
+              <button
+                className="btn"
+                disabled={saving}
+                onClick={() => setEditing(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn primary"
+                disabled={saving}
+                onClick={save}
+              >
+                {saving ? "Saving..." : "Save changes"}
+              </button>
             </>
-          )}
+          }
         >
-          <Field label="Address"><input type="text" value={f.address} onChange={set('address')} /></Field>
+          {saveError && (
+            <Note tone="red" icon="alert">
+              {saveError}
+            </Note>
+          )}
+
+          <Field label="Address">
+            <input
+              type="text"
+              value={f.address}
+              onChange={set("address")}
+            />
+          </Field>
+
           <div className="form-grid">
-            <h3 className="full">Authorized person: {a.authorized.name}</h3>
-            <Field label="Contact no."><input type="tel" value={f.authContact} onChange={set('authContact')} /></Field>
-            <Field label="Email address"><input type="email" value={f.authEmail} onChange={set('authEmail')} /></Field>
-            <h3 className="full">Medical report and billing: {a.billing.name}</h3>
-            <Field label="Contact no."><input type="tel" value={f.billContact} onChange={set('billContact')} /></Field>
-            <Field label="Email address"><input type="email" value={f.billEmail} onChange={set('billEmail')} /></Field>
+            <h3 className="full">
+              Authorized person: {a.authorized.name}
+            </h3>
+
+            <Field label="Contact no.">
+              <input
+                type="tel"
+                value={f.authContact}
+                onChange={set("authContact")}
+              />
+            </Field>
+
+            <Field label="Email address">
+              <input
+                type="email"
+                value={f.authEmail}
+                onChange={set("authEmail")}
+              />
+            </Field>
+
+            <h3 className="full">
+              Medical report and billing: {a.billing.name}
+            </h3>
+
+            <Field label="Contact no.">
+              <input
+                type="tel"
+                value={f.billContact}
+                onChange={set("billContact")}
+              />
+            </Field>
+
+            <Field label="Email address">
+              <input
+                type="email"
+                value={f.billEmail}
+                onChange={set("billEmail")}
+              />
+            </Field>
           </div>
         </Modal>
       )}

@@ -52,10 +52,8 @@ export const fmtDate = (iso) =>
 export const refOf = (n) => `SF-2026-${String(n).padStart(4, '0')}`;
 
 export const agencyName = (state, id) =>
+  state.firebaseAgencies?.[id]?.agencyName ??
   state.agencies.find((a) => a.id === id)?.name ??
-  state.endorsements.find(
-    (e) => e.agencyId === id && e.agencyName
-  )?.agencyName ??
   '—';
 
 export const isClosed = (e) => CLOSED.includes(e.status);
@@ -287,6 +285,12 @@ function reducer(s, a) {
 
   switch (a.type) {
 
+    case "setFirebaseAgencies":
+  return {
+    ...s,
+    firebaseAgencies: a.agencies,
+  };
+
 
 case "setFirebaseEndorsements": {
   if (!s.session || s.session.role !== a.role) {
@@ -336,6 +340,7 @@ case 'logout':
   return {
     ...s,
     session: null,
+    firebaseAgencies: {},
     insideNetwork: false,
     endorsements: s.endorsements.filter(
       (e) => e.source !== "firebase"
@@ -542,13 +547,18 @@ export function StoreProvider({ children }) {
 
 
 
+
 useEffect(() => {
   if (!authReady || !state.session) return;
 
   const session = state.session;
   const isAgency = session.role === "agency";
+  const currentUid = auth.currentUser?.uid;
 
   if (isAgency && !session.agencyId) return;
+
+  let cancelled = false;
+  let requestVersion = 0;
 
   const q = isAgency
     ? query(
@@ -559,13 +569,17 @@ useEffect(() => {
 
   const unsubscribe = onSnapshot(
     q,
-    (snapshot) => {
-      const endorsements = snapshot.docs.map(
-        (document) => ({
-          ...document.data(),
-          ref: document.id,
-        })
-      );
+    async (snapshot) => {
+      const version = ++requestVersion;
+
+      const endorsements = snapshot.docs.map((document) => ({
+        ...document.data(),
+        ref: document.id,
+      }));
+
+      if (cancelled || auth.currentUser?.uid !== currentUid) {
+        return;
+      }
 
       dispatch({
         type: "setFirebaseEndorsements",
@@ -573,22 +587,61 @@ useEffect(() => {
         role: session.role,
         endorsements,
       });
+
+      const agencyIds = [
+        ...new Set(
+          endorsements.map((e) => e.agencyId).filter(Boolean)
+        ),
+      ];
+
+      const profiles = await Promise.all(
+        agencyIds.map(async (id) => {
+          try {
+            const agencySnapshot = await getDoc(
+              doc(db, "agencyRequests", id)
+            );
+
+            return agencySnapshot.exists()
+              ? [id, agencySnapshot.data()]
+              : null;
+          } catch (error) {
+            console.error("Agency profile load failed:", id, error);
+            return null;
+          }
+        })
+      );
+
+      if (
+        cancelled ||
+        version !== requestVersion ||
+        auth.currentUser?.uid !== currentUid
+      ) {
+        return;
+      }
+
+      dispatch({
+        type: "setFirebaseAgencies",
+        agencies: Object.fromEntries(
+          profiles.filter(Boolean)
+        ),
+      });
     },
     (error) => {
-      console.error(
-        "Unable to load endorsements:",
-        error
-      );
+      console.error("Unable to load endorsements:", error);
     }
   );
 
-  return () => unsubscribe();
+  return () => {
+    cancelled = true;
+    unsubscribe();
+  };
 }, [
   authReady,
   state.session?.role,
   state.session?.agencyId,
   state.session?.userId,
 ]);
+
 
 
 
