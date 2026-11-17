@@ -1,4 +1,3 @@
-
 import {
   initializeApp,
   getApps,
@@ -21,17 +20,23 @@ import {
   serverTimestamp
 } from "firebase/firestore";
 
+import {
+  agencyRequestErrors,
+  clean,
+  normalizeEmail,
+  normalizeMobile,
+  normalizeUsername,
+  friendlyError
+} from "./validators.js";
+
 export async function createAgencyRequest(form) {
-  const username = form.username.trim().toLowerCase();
+  const username = normalizeUsername(form.username);
 
-  if (!/^[a-z0-9._-]{3,50}$/.test(username)) {
-    throw new Error(
-      "Username must be 3–50 characters and contain only letters, numbers, dots, underscores, or hyphens."
-    );
-  }
+  // Checked again here, so nothing is saved unless it passes the same rules as the form.
+  const problems = Object.values(agencyRequestErrors(form));
 
-  if (!form.password || form.password.length < 8) {
-    throw new Error("Password must contain at least 8 characters.");
+  if (problems.length) {
+    throw new Error(`Some details are not valid. ${problems[0]}`);
   }
 
   const email = `${username}@seaflow.example.com`;
@@ -59,21 +64,21 @@ export async function createAgencyRequest(form) {
     createdUser = credential.user;
 
     const request = {
-      agencyName: form.agencyName.trim(),
-      address: form.address.trim(),
+      agencyName: clean(form.agencyName),
+      address: clean(form.address),
 
       authorized: {
-        name: form.authName.trim(),
-        position: form.authPosition.trim(),
-        contact: form.authContact.trim(),
-        email: form.authEmail.trim()
+        name: clean(form.authName),
+        position: clean(form.authPosition),
+        contact: normalizeMobile(form.authContact),
+        email: normalizeEmail(form.authEmail)
       },
 
       billing: {
-        name: form.billName.trim(),
-        position: form.billPosition.trim(),
-        contact: form.billContact.trim(),
-        email: form.billEmail.trim()
+        name: clean(form.billName),
+        position: clean(form.billPosition),
+        contact: normalizeMobile(form.billContact),
+        email: normalizeEmail(form.billEmail)
       },
 
       username,
@@ -141,10 +146,12 @@ try {
     }
 
     if (error.code === "auth/email-already-in-use") {
-      throw new Error("That username is already registered.");
+      throw new Error("That username is already taken. Choose another one.");
     }
 
-    throw error;
+    throw new Error(
+      friendlyError(error, "Unable to submit your registration. Please try again.")
+    );
 
   } finally {
     try {

@@ -7,7 +7,9 @@ import {
   STATUSES,
   IN_PROGRESS,
   UPDATE_STATUSES,
+  isClosed,
   agencyName,
+  agencyBilling,
   dayOf,
   stamp,
   fmtDate,
@@ -21,6 +23,7 @@ import {
 import {
   Shell, Intro, Card, Chip, Field, Select, FilePick, FileRow, Paged, Table, Stat, Details, Note, Icon, Modal, useNav,
 } from '../ui.jsx';
+import { LIMITS, FILE_RULES, fileError, acceptOf, noteError } from '../validators.js';
 import { Person } from './Shared.jsx';
 import { acceptFirebaseEndorsement } from "../acceptEndorsement.js";
 
@@ -297,7 +300,17 @@ function VisitDialog({ e, onClose }) {
   const [error, setError] = useState('');
   const next = visitsOf(e).length + 1;
 
+  // The report is checked when it is picked: PDF only, not empty, within the size limit.
+  const pickReport = (name, file) => {
+    const problem = fileError(file, FILE_RULES.report);
+    setReport(problem ? '' : name);
+    setError(problem);
+  };
+
   const send = () => {
+    // A closed case (for example Fit to Work) cannot receive another visit.
+    if (isClosed(e)) return setError(`This case is closed (${e.status}). No further visits can be recorded.`);
+    if (!UPDATE_STATUSES.includes(status)) return setError('Choose a status for this visit.');
     if (!report) return setError('Attach the medical report for this visit.');
     dispatch({ type: 'recordVisit', id: e.ref, status, report });
     toast(`Clinic visit ${next} recorded · agency notified`);
@@ -323,8 +336,8 @@ function VisitDialog({ e, onClose }) {
           <Select value={status} onChange={setStatus} options={UPDATE_STATUSES} />
         </Field>
         <div className="field">
-          <label><span>Medical report (PDF) *</span></label>
-          <FilePick file={report} empty="No medical report" onPick={(n) => { setReport(n); setError(''); }} onRemove={() => setReport('')} />
+          <label><span>Medical report (PDF, up to {LIMITS.reportMaxMb} MB) *</span></label>
+          <FilePick file={report} accept={acceptOf(FILE_RULES.report)} empty="No medical report" onPick={pickReport} onRemove={() => setReport('')} />
           {error && <p className="err">{error}</p>}
         </div>
         <Note tone="teal" icon="receipt">
@@ -410,12 +423,28 @@ function BillingCard({ e, v }) {
   const { toast } = useNav();
   const [file, setFile] = useState('');
   const [error, setError] = useState('');
-  const contact = state.agencies.find((a) => a.id === e.agencyId).billing;
+  const contact = agencyBilling(state, e.agencyId);
   const due = billingDue(v);
   const left = daysLeft(due);
 
+  const [lateOk, setLateOk] = useState(false);
+
+  // The statement is checked when it is picked: PDF only, not empty, within the size limit.
+  const pickFile = (name, picked) => {
+    const problem = fileError(picked, FILE_RULES.billing);
+    setFile(problem ? '' : name);
+    setError(problem);
+  };
+
   const send = () => {
+    if (!v.report) return setError('Record the clinic visit and its medical report before sending billing.');
+    if (v.billing) return setError('A billing statement was already sent for this visit.');
     if (!file) return setError('Attach the billing statement before sending.');
+    // Past the 30-day limit: the first click warns, the second click sends.
+    if (left < 0 && !lateOk) {
+      setLateOk(true);
+      return setError(`This billing is ${-left} day${left === -1 ? '' : 's'} past the 30-day limit. Click Send billing again to send it anyway. It will be recorded as late.`);
+    }
     dispatch({ type: 'sendBilling', id: e.ref, n: v.n, file });
     return toast(`Billing for clinic visit ${v.n} sent · agency notified`);
   };
@@ -446,7 +475,7 @@ function BillingCard({ e, v }) {
         ]}
       />
       <div className="rec-f">
-        <FilePick file={file} empty="No billing statement" onPick={(n) => { setFile(n); setError(''); }} onRemove={() => setFile('')} />
+        <FilePick file={file} accept={acceptOf(FILE_RULES.billing)} empty="No billing statement (PDF)" onPick={pickFile} onRemove={() => setFile('')} />
         <button className="btn primary sm" onClick={send}>Send billing</button>
       </div>
       {error && <p className="err">{error}</p>}
@@ -657,8 +686,17 @@ export function BreakGlass({ id }) {
   const [note, setNote] = useState('');
   const [error, setError] = useState('');
 
+  const other = reason === 'Other';
+  const active = hasBreakGlass(state, id); // full access is already open for this record
+
+  // "Other" says nothing by itself, so the note has to explain it.
+  const check = () => (other
+    ? noteError(note, { min: LIMITS.otherNote.min, max: LIMITS.note.max, what: 'explanation' })
+    : noteError(note, { what: 'supporting note' }));
+
   const confirm = () => {
-    if (!note.trim()) return setError('A supporting note is required.');
+    if (active) return setError('Full access is already open for this record. Wait for it to end before asking again.');
+    if (check()) return setError(check());
     dispatch({ type: 'breakGlass', id, reason, note: note.trim() });
     toast(`Full access for ${minutes} minutes · admin notified`);
     return back();
@@ -675,12 +713,17 @@ export function BreakGlass({ id }) {
           <Field label="Reason *">
             <Select value={reason} onChange={setReason} options={REASONS} />
           </Field>
-          <Field label="Supporting note *" error={error}>
-            <textarea value={note} placeholder="Add a justification" onChange={(ev) => { setNote(ev.target.value); setError(''); }} />
+          <Field label={other ? 'Explain the reason *' : 'Supporting note *'} error={error} hint={`${note.trim().length} of ${LIMITS.note.max} characters`}>
+            <textarea value={note} maxLength={LIMITS.note.max} placeholder={other ? 'Say why full access is needed' : 'Add a justification'}
+              onChange={(ev) => { setNote(ev.target.value); setError(''); }}
+              onBlur={() => note.trim() && setError(check())} />
           </Field>
+          {active && (
+            <Note tone="teal" icon="alert">Full access is already open for this record, so a second request is not needed.</Note>
+          )}
         </div>
         <div className="card-foot">
-          <button className="btn primary" onClick={confirm}>Confirm {minutes}-minute access</button>
+          <button className="btn primary" disabled={active} onClick={confirm}>Confirm {minutes}-minute access</button>
           <button className="btn" onClick={back}>Cancel</button>
         </div>
       </Card>

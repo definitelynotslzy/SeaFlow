@@ -4,7 +4,10 @@ import { useStore, IN_PROGRESS, CLOSED, isClosed, refOf, stamp, visitsOf } from 
 import { Shell, Intro, Card, Chip, Field, Select, FilePick, Table, Stat, Empty, Note, Icon, useNav } from '../ui.jsx';
 import { Person } from './Shared.jsx';
 import { createEndorsement } from "../endorsementService.js";
-import { emailError, mobileError } from '../validation.js';
+import {
+  LIMITS, RANKS, FILE_RULES, ENDORSEMENT_RULES, endorsementErrors, cleanEndorsement, fileError, acceptOf,
+  ageFrom, sameText, todayISO, addDays, friendlyError,
+} from '../validators.js';
 
 
 function useMine() {
@@ -211,24 +214,27 @@ export function Endorsements({ group = 'All' }) {
   );
 }
 
-const today = () => new Date().toISOString().slice(0, 10);
-
 const BLANK = {
   name: '', birthday: '', age: '', address: '', email: '', contact: '',
   position: '', vessel: '', repatriation: '', case: '', visitDate: '', referral: '', confirm: false,
 };
-function ageFrom(birthday) {
-  if (!birthday) return '';
-  const d = new Date(birthday);
-  const now = new Date();
-  let age = now.getFullYear() - d.getFullYear();
-  if (now < new Date(now.getFullYear(), d.getMonth(), d.getDate())) age -= 1;
-  return age >= 0 && age < 120 ? String(age) : '';
-}
 
-/** New endorsement, in three sections, with the duplicate warning. */
+// Typing limits and keyboard hints for each text field.
+const INPUT_PROPS = {
+  name: { maxLength: LIMITS.name.max, autoComplete: 'off' },
+  birthday: { min: addDays(todayISO(), -366 * LIMITS.ageMax), max: todayISO() },
+  address: { maxLength: LIMITS.address.max, autoComplete: 'off' },
+  email: { maxLength: LIMITS.email.max, inputMode: 'email', autoCapitalize: 'none', autoComplete: 'off' },
+  contact: { maxLength: 16, inputMode: 'tel', autoComplete: 'off' },
+  position: { maxLength: LIMITS.position.max, list: 'ranks', autoComplete: 'off' },
+  vessel: { maxLength: LIMITS.vessel.max, autoComplete: 'off' },
+  repatriation: { min: LIMITS.earliestRepatriation, max: addDays(todayISO(), LIMITS.repatriationFutureDays) },
+  case: { maxLength: LIMITS.reason.max, autoComplete: 'off' },
+  visitDate: { min: todayISO(), max: addDays(todayISO(), LIMITS.visitWindowDays) },
+};
+
+/** New endorsement, in three sections, with the duplicate check. */
 export function NewEndorsement() {
-  const { state, dispatch } = useStore();
   const { reset, back } = useNav();
   const { agency, mine } = useMine();
   const [f, setF] = useState(BLANK);
@@ -239,111 +245,84 @@ export function NewEndorsement() {
   const set = (k) => (ev) => {
     const value = ev.target.type === 'checkbox' ? ev.target.checked : ev.target.value;
     const next = { ...f, [k]: value };
-    if (k === 'birthday') next.age = ageFrom(value); // age follows the birthday
-    if (k === 'name' || k === 'vessel') setDupWarned(false);
+    if (k === 'birthday') next.age = ageFrom(value); // the age always follows the birthday
+    if (k === 'name' || k === 'vessel' || k === 'birthday') setDupWarned(false);
     setF(next);
-    if (errors[k]) setErrors({ ...errors, [k]: undefined }); // editing a field clears its error
+    if (errors[k] || errors.submit) setErrors({ ...errors, [k]: undefined, submit: undefined }); // editing clears the error
   };
 
-  // Email and contact number are checked as soon as the user leaves the field.
-  const CHECK_ON_BLUR = { email: emailError, contact: mobileError };
+  // Each field is checked as soon as the user leaves it. An untouched empty
+  // field stays quiet until the form is submitted.
   const blur = (k) => () => {
-    const check = CHECK_ON_BLUR[k];
-    if (check && String(f[k]).trim()) setErrors({ ...errors, [k]: check(f[k]) || undefined });
+    if (!String(f[k]).trim()) return;
+    const next = { ...errors, [k]: ENDORSEMENT_RULES[k](f) || undefined };
+    // The visit date depends on the repatriation date, so re-check it too.
+    if (k === 'repatriation' && f.visitDate) next.visitDate = ENDORSEMENT_RULES.visitDate(f) || undefined;
+    setErrors(next);
   };
 
-
-const submit = async (ev) => {
-  ev.preventDefault();
-
-  if (submitting) return;
-
-  const e = {};
-
-  Object.keys(BLANK).forEach((k) => {
-    if (
-      k !== "confirm" &&
-      k !== "referral" &&
-      !String(f[k]).trim()
-    ) {
-      e[k] = "This field is required.";
+  // The referral letter is checked when it is picked: PDF, JPG or PNG, not empty, within the size limit.
+  const pickReferral = (name, file) => {
+    const problem = fileError(file, FILE_RULES.referral);
+    if (problem) {
+      setF({ ...f, referral: '' });
+      return setErrors({ ...errors, referral: problem });
     }
-  });
+    setF({ ...f, referral: name });
+    return setErrors({ ...errors, referral: undefined });
+  };
 
-  // Incomplete email addresses and contact numbers are rejected (see validation.js).
-  if (f.email.trim() && emailError(f.email)) {
-    e.email = emailError(f.email);
-  }
-
-  if (f.contact.trim() && mobileError(f.contact)) {
-    e.contact = mobileError(f.contact);
-  }
-
-  if (f.visitDate && f.visitDate < today()) {
-    e.visitDate = "Choose today or a later date.";
-  }
-
-  if (!f.referral) {
-    e.referral = "Attach the referral letter.";
-  }
-
-  if (!f.confirm) {
-    e.confirm = "Please confirm authorization.";
-  }
-
-  setErrors(e);
-
-  if (Object.keys(e).length) return;
-
-  const same = (a, b) =>
-    a.trim().toLowerCase() === b.trim().toLowerCase();
-
-  const duplicate = mine.some(
-    (x) =>
-      !isClosed(x) &&
-      same(x.name, f.name) &&
-      same(x.vessel, f.vessel)
+  // Open endorsements of the same person. Case, spacing and punctuation are ignored.
+  const samePerson = mine.filter(
+    (x) => !isClosed(x) && sameText(x.name, f.name) && (x.birthday || '') === f.birthday,
   );
+  const exactDuplicate = samePerson.find((x) => sameText(x.vessel, f.vessel));
 
-  if (duplicate && !dupWarned) {
-    setDupWarned(true);
-    return;
-  }
+  const submit = async (ev) => {
+    ev.preventDefault();
+    if (submitting) return;
 
-  setSubmitting(true);
+    const e = endorsementErrors(f);
+    if (!f.confirm) e.confirm = 'Please confirm authorization.';
+    setErrors(e);
+    if (Object.keys(e).length) return;
 
-  try {
-    const { confirm, ...data } = f;
+    // The same seafarer on the same vessel is already open: this is blocked.
+    if (exactDuplicate) {
+      setErrors({
+        submit: `${exactDuplicate.name} on ${exactDuplicate.vessel} already has an open endorsement (PT-${exactDuplicate.ref}). Open that record instead of sending a new one.`,
+      });
+      return;
+    }
 
-    const endorsement = await createEndorsement({
-      ...data,
-      age: Number(f.age),
-    });
+    // The same seafarer on another vessel is only a warning.
+    if (samePerson.length && !dupWarned) {
+      setDupWarned(true);
+      return;
+    }
 
-    reset("m.submitted", {
-      id: endorsement.ref,
-    });
+    setSubmitting(true);
 
-  } catch (error) {
-    console.error("Endorsement submission failed:", error);
-
-    setErrors((prev) => ({
-      ...prev,
-      submit:
-        error.code === "permission-denied"
-          ? "Permission denied. Check your agency approval and Firestore rules."
-          : error.message || "Unable to submit endorsement.",
-    }));
-
-  } finally {
-    setSubmitting(false);
-  }
-};
-
+    try {
+      const { confirm, ...data } = cleanEndorsement(f);
+      const endorsement = await createEndorsement(data);
+      reset('m.submitted', { id: endorsement.ref });
+    } catch (error) {
+      console.error('Endorsement submission failed:', error);
+      setErrors((prev) => ({
+        ...prev,
+        submit: error.code === 'permission-denied'
+          ? 'Your agency account is not allowed to submit endorsements yet. Contact the clinic.'
+          : friendlyError(error, 'Unable to submit the endorsement. Please try again.'),
+      }));
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   const input = (k, label, placeholder, type = 'text', hint) => (
     <Field label={`${label} *`} error={errors[k]} hint={hint}>
-      <input type={type} value={f[k]} placeholder={placeholder} onChange={set(k)} onBlur={blur(k)} />
+      <input type={type} value={f[k]} placeholder={placeholder} onChange={set(k)} onBlur={blur(k)} {...INPUT_PROPS[k]} />
     </Field>
   );
 
@@ -353,7 +332,7 @@ const submit = async (ev) => {
       <form className="stack" onSubmit={submit} noValidate>
         {dupWarned && (
           <Note tone="amber" icon="alert" title="Possible duplicate">
-            The same name and vessel are already endorsed and still open. Submit again to confirm.
+            A seafarer with the same name and birthday already has an open endorsement on another vessel. Submit again to confirm.
           </Note>
         )}
         <div className="split even">
@@ -362,7 +341,9 @@ const submit = async (ev) => {
               {input('name', 'Seafarer full name', 'Juan Dela Cruz')}
               <div className="two">
                 {input('birthday', 'Birthday', '', 'date')}
-                {input('age', 'Age', 'e.g. 32', 'number')}
+                <Field label="Age" hint="Filled in from the birthday.">
+                  <input type="text" value={f.age} placeholder="—" readOnly tabIndex={-1} />
+                </Field>
               </div>
               {input('address', 'Address', 'Street, barangay, city')}
               <div className="two">
@@ -378,6 +359,9 @@ const submit = async (ev) => {
                   {input('position', 'Position', '3rd Officer')}
                   {input('vessel', 'Vessel (name of the ship)', 'MV Pacific Star')}
                 </div>
+                <datalist id="ranks">
+                  {RANKS.map((rank) => <option key={rank} value={rank} />)}
+                </datalist>
                 <div className="two">
                   <Field label="Agent *">
                     <input type="text" value={agency.name} readOnly />
@@ -391,11 +375,12 @@ const submit = async (ev) => {
               <div className="form">
                 {input('visitDate', 'When can the patient come to the clinic?', '', 'date')}
                 <div className="field">
-                  <label><span>Referral letter (PDF or photo) *</span></label>
+                  <label><span>Referral letter (PDF, JPG or PNG, up to {LIMITS.referralMaxMb} MB) *</span></label>
                   <FilePick
                     file={f.referral}
+                    accept={acceptOf(FILE_RULES.referral)}
                     empty="No referral letter attached"
-                    onPick={(name) => { setF({ ...f, referral: name }); setErrors({ ...errors, referral: undefined }); }}
+                    onPick={pickReferral}
                     onRemove={() => setF({ ...f, referral: '' })}
                   />
                   {errors.referral && <p className="err">{errors.referral}</p>}

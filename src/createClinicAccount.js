@@ -1,4 +1,3 @@
-
 import { initializeApp, getApps } from "firebase/app";
 
 import {
@@ -15,6 +14,7 @@ import {
 } from "firebase/firestore";
 
 import { db } from "./firebase.js";
+import { clinicAccountErrors, clean, normalizeUsername, friendlyError } from "./validators.js";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -38,25 +38,16 @@ export async function createClinicAccount({
   password,
   role
 }) {
-  const cleanUsername = username.trim().toLowerCase();
-  const cleanName = name.trim();
+  const cleanUsername = normalizeUsername(username);
+  const cleanName = clean(name);
 
-  if (!cleanName) {
-    throw new Error("Enter the full name.");
-  }
+  // Checked again here, so nothing is saved unless it passes the same rules as the form.
+  const problems = Object.values(
+    clinicAccountErrors({ name, username, password })
+  );
 
-  if (!/^[a-z0-9._-]+$/.test(cleanUsername)) {
-    throw new Error(
-      "Username can only contain letters, numbers, dots, underscores and hyphens."
-    );
-  }
-
-  if (cleanUsername === "admin.demo") {
-    throw new Error("This username is reserved.");
-  }
-
-  if (password.length < 8) {
-    throw new Error("Password must contain at least 8 characters.");
+  if (problems.length) {
+    throw new Error(problems[0]);
   }
 
   if (role !== "Clinic Staff") {
@@ -95,10 +86,12 @@ export async function createClinicAccount({
 
   } catch (error) {
     if (error.code === "auth/email-already-in-use") {
-      throw new Error("That username is already taken.");
+      throw new Error("That username is already taken. Choose another one.");
     }
 
-    throw error;
+    throw new Error(
+      friendlyError(error, "Unable to create the account. Please try again.")
+    );
 
   } finally {
     if (secondaryAuth.currentUser) {
