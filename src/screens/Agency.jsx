@@ -5,7 +5,7 @@ import { Shell, Intro, Card, Chip, Field, Select, FilePick, Table, Stat, Empty, 
 import { Person } from './Shared.jsx';
 import { createEndorsement } from "../endorsementService.js";
 import {
-  LIMITS, RANKS, FILE_RULES, ENDORSEMENT_RULES, endorsementErrors, cleanEndorsement, fileError, acceptOf,
+  LIMITS, FILE_RULES, ENDORSEMENT_RULES, endorsementErrors, cleanEndorsement, fileError, acceptOf,
   ageFrom, sameText, todayISO, addDays, friendlyError,
 } from '../validators.js';
 
@@ -226,7 +226,7 @@ const INPUT_PROPS = {
   address: { maxLength: LIMITS.address.max, autoComplete: 'off' },
   email: { maxLength: LIMITS.email.max, inputMode: 'email', autoCapitalize: 'none', autoComplete: 'off' },
   contact: { maxLength: 16, inputMode: 'tel', autoComplete: 'off' },
-  position: { maxLength: LIMITS.position.max, list: 'ranks', autoComplete: 'off' },
+  position: { maxLength: LIMITS.position.max, autoComplete: 'off' },
   vessel: { maxLength: LIMITS.vessel.max, autoComplete: 'off' },
   repatriation: { min: LIMITS.earliestRepatriation, max: addDays(todayISO(), LIMITS.repatriationFutureDays) },
   case: { maxLength: LIMITS.reason.max, autoComplete: 'off' },
@@ -356,22 +356,19 @@ export function NewEndorsement() {
             <Card title="Assignment and Case">
               <div className="form">
                 <div className="two">
-                  {input('position', 'Position', '3rd Officer')}
-                  {input('vessel', 'Vessel (name of the ship)', 'MV Pacific Star')}
+                  {input('position', 'Position', '')}
+                  {input('vessel', 'Vessel', '')}
                 </div>
-                <datalist id="ranks">
-                  {RANKS.map((rank) => <option key={rank} value={rank} />)}
-                </datalist>
                 <div className="two">
                   <Field label="Agent *">
                     <input type="text" value={agency.name} readOnly />
                   </Field>
                   {input('repatriation', 'Date of repatriation', '', 'date')}
                 </div>
-                {input('case', 'Reason for endorsement', 'e.g. Fractured wrist')}
+                {input('case', 'Case', 'Reason for endorsement')}
               </div>
             </Card>
-            <Card title="Clinic visit" sub="The clinic sends a medical report at each visit. Billing statements follow separately.">
+            <Card title="Clinic visit">
               <div className="form">
                 {input('visitDate', 'When can the patient come to the clinic?', '', 'date')}
                 <div className="field">
