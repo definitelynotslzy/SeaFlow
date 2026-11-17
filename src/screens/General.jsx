@@ -1,10 +1,26 @@
 // Signed-out screens: sign in, agency registration, agency password reset.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useStore } from '../store.jsx';
 import { Shell, Field, Select, Note, Icon, useNav } from '../ui.jsx';
 import { loginClinicUser } from "../adminAuth.js";
 import { createAgencyRequest } from "../createAgencyRequest.js";
 import { loginAgency } from "../agencyAuth.js";
+import {
+  LIMITS, AGENCY_RULES, agencyRequestErrors, agencyKey, passwordError, confirmError, codeError, digitsOnly,
+  friendlyError,
+} from '../validators.js';
+
+/** Counts down the seconds left until `until` (a time in ms), then stays at 0. */
+function useCountdown(until) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (until <= Date.now()) return undefined;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(timer);
+  }, [until]);
+  return Math.max(0, Math.ceil((until - now) / 1000));
+}
 
 export function SignIn() {
   const { state, dispatch } = useStore();
@@ -12,17 +28,26 @@ export function SignIn() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [show, setShow] = useState(false);
-  const [error, setError] = useState('');
+  const [errors, setErrors] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(0);
+  const [pausedUntil, setPausedUntil] = useState(0);
+  const wait = useCountdown(pausedUntil);
 
   // There is no account type picker. The system works out who is signing in:
   // it checks clinic accounts (admin and staff) first, then manning agencies.
   const submit = async (ev) => {
     ev.preventDefault();
-    setError('');
+    if (busy || wait) return;
 
-    const u = username.trim();
-    if (!u) return setError('Enter your username.');
+    const u = username.trim().toLowerCase();
+    const e = {};
+    if (!u) e.username = 'Enter your username.';
+    if (!password) e.password = 'Enter your password.';
+    setErrors(e);
+    if (Object.keys(e).length) return;
 
+    setBusy(true);
     let clinicError;
     try {
       const session = await loginClinicUser(u, password);
@@ -50,11 +75,26 @@ export function SignIn() {
     }
 
     console.error('Sign-in failed:', clinicError);
-    setError(
-      clinicError.code === 'auth/invalid-credential'
-        ? 'Invalid username or password.'
-        : clinicError.message || 'Unable to sign in.'
-    );
+    setBusy(false);
+
+    // Too many wrong tries: pause the form for a short while.
+    const wrongPassword = ['auth/invalid-credential', 'auth/wrong-password', 'auth/user-not-found'].includes(clinicError.code);
+    const tries = wrongPassword ? failed + 1 : failed;
+    if (clinicError.code === 'auth/too-many-requests') {
+      setPausedUntil(Date.now() + 60e3);
+    } else if (tries >= LIMITS.signInAttempts) {
+      setFailed(0);
+      setPausedUntil(Date.now() + LIMITS.signInPauseSeconds * 1000);
+      return setErrors({ form: `Too many failed attempts. Please wait ${LIMITS.signInPauseSeconds} seconds before trying again.` });
+    } else {
+      setFailed(tries);
+    }
+    return setErrors({ form: friendlyError(clinicError, 'Unable to sign in. Please try again.') });
+  };
+
+  const edit = (setter, k) => (ev) => {
+    setter(ev.target.value);
+    if (errors[k] || errors.form) setErrors({ ...errors, [k]: undefined, form: undefined });
   };
 
   return (
@@ -62,11 +102,13 @@ export function SignIn() {
       <h2>Welcome back to SeaFlow</h2>
       <p className="lead">Enter your username and password to continue.</p>
       <form className="form" onSubmit={submit} noValidate>
-        <Field label="Username" error={error && ' '}>
-          <input type="text" value={username} autoCapitalize="none" autoComplete="username" onChange={(ev) => setUsername(ev.target.value)} />
+        <Field label="Username" error={errors.username || (errors.form && ' ')}>
+          <input type="text" value={username} maxLength={LIMITS.username.max} autoCapitalize="none" spellCheck={false}
+            autoComplete="username" onChange={edit(setUsername, 'username')} />
         </Field>
-        <Field label="Password" error={error && ' '}>
-          <input type={show ? 'text' : 'password'} value={password} autoComplete="current-password" onChange={(ev) => setPassword(ev.target.value)} />
+        <Field label="Password" error={errors.password || (errors.form && ' ')}>
+          <input type={show ? 'text' : 'password'} value={password} maxLength={LIMITS.password.max}
+            autoComplete="current-password" onChange={edit(setPassword, 'password')} />
         </Field>
         <div className="link-row">
           <button type="button" className="link" onClick={() => setShow(!show)}>
@@ -76,8 +118,10 @@ export function SignIn() {
             Forgot password?
           </button>
         </div>
-        {error && <Note tone="red" icon="alert">{error}</Note>}
-        <button className="btn primary block lg">Sign in to SeaFlow</button>
+        {errors.form && <Note tone="red" icon="alert">{errors.form}</Note>}
+        <button className="btn primary block lg" disabled={busy || wait > 0}>
+          {wait > 0 ? `Try again in ${wait}s` : busy ? 'Signing in...' : 'Sign in to SeaFlow'}
+        </button>
       </form>
 
       <div className="auth-alt">
@@ -95,88 +139,87 @@ const EMPTY = {
   agencyName: '', address: '',
   authName: '', authPosition: '', authContact: '', authEmail: '',
   billName: '', billPosition: '', billContact: '', billEmail: '',
-  username: '', password: '',
+  username: '', password: '', again: '',
   confirm: false,
 };
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Typing limits and keyboard hints for each field.
+const NAME = { maxLength: LIMITS.name.max, autoComplete: 'name' };
+const TITLE = { maxLength: LIMITS.position.max, autoComplete: 'organization-title' };
+const PHONE = { maxLength: 16, inputMode: 'tel', autoComplete: 'tel' };
+const MAIL = { maxLength: LIMITS.email.max, inputMode: 'email', autoCapitalize: 'none', autoComplete: 'email' };
+const INPUT_PROPS = {
+  agencyName: { maxLength: LIMITS.agencyName.max, autoComplete: 'organization' },
+  address: { maxLength: LIMITS.address.max, autoComplete: 'street-address' },
+  authName: NAME, authPosition: TITLE, authContact: PHONE, authEmail: MAIL,
+  billName: NAME, billPosition: TITLE, billContact: PHONE, billEmail: MAIL,
+  username: { maxLength: LIMITS.username.max, autoCapitalize: 'none', spellCheck: false, autoComplete: 'username' },
+  password: { maxLength: LIMITS.password.max, autoComplete: 'new-password' },
+  again: { maxLength: LIMITS.password.max, autoComplete: 'new-password' },
+};
+
+const RULES = { ...AGENCY_RULES, again: (f) => confirmError(f.password, f.again) };
 
 /** Agency registration. No supporting documents are needed. */
 export function RequestAccess() {
-  const { state, dispatch } = useStore();
+  const { state } = useStore();
   const { nav, back } = useNav();
-const [f, setF] = useState(EMPTY);
-const [errors, setErrors] = useState({});
-const [submitting, setSubmitting] = useState(false);
-  const set = (k) => (ev) => setF({ ...f, [k]: ev.target.type === 'checkbox' ? ev.target.checked : ev.target.value });
+  const [f, setF] = useState(EMPTY);
+  const [errors, setErrors] = useState({});
+  const [submitting, setSubmitting] = useState(false);
 
+  const set = (k) => (ev) => {
+    setF({ ...f, [k]: ev.target.type === 'checkbox' ? ev.target.checked : ev.target.value });
+    if (errors[k] || errors.submit) setErrors({ ...errors, [k]: undefined, submit: undefined }); // editing clears the error
+  };
 
-const submit = async (ev) => {
-  ev.preventDefault();
+  // An agency with the same name, ignoring case and endings such as "Inc." or "Corp."
+  const taken = (name) => {
+    const key = agencyKey(name);
+    return key && state.agencies.some((a) => agencyKey(a.name || a.agencyName || '') === key);
+  };
 
-  if (submitting) return;
+  // Each field is checked as soon as the user leaves it.
+  const blur = (k) => () => {
+    if (!String(f[k]).trim()) return;
+    const next = { ...errors, [k]: RULES[k](f) || undefined };
+    if (k === 'agencyName' && !next.agencyName && taken(f.agencyName)) next.agencyName = 'This agency is already registered. Sign in, or contact the clinic.';
+    if (k === 'password' && f.again) next.again = RULES.again(f) || undefined;
+    if (k === 'username' && f.password) next.password = RULES.password(f) || undefined;
+    setErrors(next);
+  };
 
-  const e = {};
+  const submit = async (ev) => {
+    ev.preventDefault();
+    if (submitting) return;
 
-  Object.keys(EMPTY).forEach((k) => {
-    if (k !== "confirm" && !String(f[k]).trim()) {
-      e[k] = "This field is required.";
+    const e = agencyRequestErrors(f);
+    if (!e.agencyName && taken(f.agencyName)) e.agencyName = 'This agency is already registered. Sign in, or contact the clinic.';
+    const again = RULES.again(f);
+    if (again) e.again = again;
+    if (!f.confirm) e.confirm = 'Please confirm you are authorized.';
+
+    setErrors(e);
+    if (Object.keys(e).length) return;
+
+    setSubmitting(true);
+
+    try {
+      await createAgencyRequest(f); // cleans the details before saving
+      nav('g.submitted', { name: f.agencyName.trim() });
+    } catch (error) {
+      console.error('Agency registration failed:', error);
+      const message = friendlyError(error, 'Unable to submit your registration. Please try again.');
+      // A username that is already in use is shown beside the username field.
+      setErrors(/username/i.test(message) ? { username: message } : { submit: message });
+    } finally {
+      setSubmitting(false);
     }
-  });
+  };
 
-  ["authEmail", "billEmail"].forEach((k) => {
-    if (f[k] && !EMAIL.test(f[k])) {
-      e[k] = "Enter a valid email address.";
-    }
-  });
-
-  if (f.password && f.password.length < 8) {
-    e.password = "Use at least 8 characters.";
-  }
-
-  const cleanUsername = f.username.trim().toLowerCase();
-
-  if (
-    cleanUsername &&
-    !/^[a-z0-9._-]{3,50}$/.test(cleanUsername)
-  ) {
-    e.username = "Use 3–50 letters, numbers, dots, underscores or hyphens.";
-  }
-
-  if (!f.confirm) {
-    e.confirm = "Please confirm you are authorized.";
-  }
-
-  setErrors(e);
-  if (Object.keys(e).length) return;
-
-  setSubmitting(true);
-
-  try {
-    await createAgencyRequest({
-      ...f,
-      username: cleanUsername
-    });
-
-    nav("g.submitted", {
-      name: f.agencyName.trim()
-    });
-  } catch (error) {
-    console.error("Agency registration failed:", error);
-
-    setErrors({
-      submit:
-        error.message ||
-        "Unable to submit your registration. Please try again."
-    });
-  } finally {
-    setSubmitting(false);
-  }
-};
-
-
-  const text = (k, label, placeholder, type = 'text', className = '') => (
-    <Field label={`${label} *`} error={errors[k]} className={className}>
-      <input type={type} value={f[k]} placeholder={placeholder} onChange={set(k)} />
+  const text = (k, label, placeholder, type = 'text', hint) => (
+    <Field label={`${label} *`} error={errors[k]} hint={hint}>
+      <input type={type} value={f[k]} placeholder={placeholder} onChange={set(k)} onBlur={blur(k)} {...INPUT_PROPS[k]} />
     </Field>
   );
 
@@ -206,8 +249,11 @@ const submit = async (ev) => {
           {text('billEmail', 'Email address', 'billing@agency.com', 'email')}
 
           <h3 className="full">Login</h3>
-          {text('username', 'Username', 'Choose a username')}
-          {text('password', 'Password (min. 8 characters)', '', 'password')}
+          <div className="full">
+            {text('username', 'Username', 'Choose a username', 'text', 'Starts with a letter. Letters, numbers, dots, underscores and hyphens only.')}
+          </div>
+          {text('password', 'Password', '', 'password', 'At least 8 characters, with a letter and a number.')}
+          {text('again', 'Confirm password', '', 'password')}
         </div>
 
         <div>
@@ -217,15 +263,11 @@ const submit = async (ev) => {
           </label>
           {errors.confirm && <p className="err">{errors.confirm}</p>}
         </div>
-        {errors.submit && (
-  <Note tone="red" icon="alert">
-    {errors.submit}
-  </Note>
-)}
+        {errors.submit && <Note tone="red" icon="alert">{errors.submit}</Note>}
         <div className="actions">
           <button className="btn primary" disabled={submitting}>
-  {submitting ? "Submitting..." : "Submit request"}
-</button>
+            {submitting ? 'Submitting...' : 'Submit request'}
+          </button>
           <button type="button" className="btn" onClick={back}>Cancel</button>
         </div>
       </form>
@@ -257,6 +299,7 @@ const maskPhone = (phone) => `•••• ••• ${phone.replace(/\D/g, '').
  * Password reset.
  * Manning agencies verify with a 6-digit code sent to the authorized person's
  * email or mobile number. Clinic staff ask the clinic admin instead.
+ * The code works for a limited time and a limited number of tries.
  */
 export function ForgotPassword({ role = 'agency', username: initial = '' }) {
   const { state, dispatch } = useStore();
@@ -264,11 +307,13 @@ export function ForgotPassword({ role = 'agency', username: initial = '' }) {
   const [step, setStep] = useState(1);
   const [username, setUsername] = useState(initial);
   const [channel, setChannel] = useState('email');
-  const [sent, setSent] = useState(null); // { code, to }
+  const [sent, setSent] = useState(null); // { code, to, expires, tries }
+  const [resendAt, setResendAt] = useState(0);
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
   const [again, setAgain] = useState('');
-  const [error, setError] = useState('');
+  const [errors, setErrors] = useState({});
+  const wait = useCountdown(resendAt);
 
   if (role !== 'agency') {
     return (
@@ -283,31 +328,59 @@ export function ForgotPassword({ role = 'agency', username: initial = '' }) {
     );
   }
 
-  const agency = state.agencies.find((a) => a.username === username.trim());
+  const agency = state.agencies.find((a) => a.username === username.trim().toLowerCase());
 
   const sendCode = (ev) => {
-    ev.preventDefault();
-    if (!agency) return setError('No manning agency account uses that username. Clinic staff and admin should ask the clinic admin to reset their password.');
+    ev?.preventDefault();
+    if (wait) return undefined;
+    if (!username.trim()) return setErrors({ username: 'Enter your agency username.' });
+    if (!agency) return setErrors({ username: 'No manning agency account uses that username. Clinic staff and admin should ask the clinic admin to reset their password.' });
     // Demo only: a real system sends this by email or SMS and never shows it on screen.
     const fresh = String(Math.floor(100000 + Math.random() * 900000));
     setSent({
       code: fresh,
       to: channel === 'email' ? maskEmail(agency.authorized.email) : maskPhone(agency.authorized.contact),
+      expires: Date.now() + LIMITS.codeMinutes * 60e3,
+      tries: 0,
     });
-    setError('');
+    setResendAt(Date.now() + LIMITS.resendSeconds * 1000);
+    setErrors({});
     setCode('');
     return setStep(2);
   };
 
+  const used = sent && sent.tries >= LIMITS.codeAttempts;
+
   const save = (ev) => {
     ev.preventDefault();
-    if (code.trim() !== sent.code) return setError('That verification code is not correct.');
-    if (password.length < 8) return setError('Use at least 8 characters for the new password.');
-    if (password !== again) return setError('The two passwords do not match.');
+    if (used) return setErrors({ code: 'Too many wrong codes. Send a new code to continue.' });
+    if (Date.now() > sent.expires) return setErrors({ code: `That code has expired. Codes last ${LIMITS.codeMinutes} minutes. Send a new code.` });
+
+    const e = {};
+    if (codeError(code)) e.code = codeError(code);
+    const pw = passwordError(password, { username: agency.username, previous: agency.password });
+    if (pw) e.password = pw;
+    const match = confirmError(password, again);
+    if (match) e.again = match;
+    if (Object.keys(e).length) return setErrors(e);
+
+    if (code !== sent.code) {
+      const tries = sent.tries + 1;
+      const left = LIMITS.codeAttempts - tries;
+      setSent({ ...sent, tries });
+      return setErrors({
+        code: left > 0
+          ? `That code is not correct. ${left} ${left === 1 ? 'try' : 'tries'} left.`
+          : 'Too many wrong codes. Send a new code to continue.',
+      });
+    }
+
     dispatch({ type: 'resetAgencyPassword', username: agency.username, password });
     toast('Password changed. Sign in with your new password.');
     return reset('signin');
   };
+
+  const clear = (k) => { if (errors[k]) setErrors({ ...errors, [k]: undefined }); };
 
   return (
     <Shell title="Forgot password" back>
@@ -316,9 +389,9 @@ export function ForgotPassword({ role = 'agency', username: initial = '' }) {
         <>
           <p className="lead">We send a verification code to the authorized person on your agency account.</p>
           <form className="form" onSubmit={sendCode} noValidate>
-            <Field label="Agency username" error={error}>
-              <input type="text" value={username} autoCapitalize="none"
-                onChange={(ev) => { setUsername(ev.target.value); setError(''); }} />
+            <Field label="Agency username" error={errors.username}>
+              <input type="text" value={username} maxLength={LIMITS.username.max} autoCapitalize="none" spellCheck={false}
+                autoComplete="username" onChange={(ev) => { setUsername(ev.target.value); clear('username'); }} />
             </Field>
             <Field label="Send the code to">
               <Select
@@ -327,30 +400,36 @@ export function ForgotPassword({ role = 'agency', username: initial = '' }) {
                 options={[{ value: 'email', label: 'Email address' }, { value: 'sms', label: 'Mobile number' }]}
               />
             </Field>
-            <button className="btn primary block">Send verification code</button>
+            <button className="btn primary block" disabled={wait > 0}>
+              {wait > 0 ? `Send another code in ${wait}s` : 'Send verification code'}
+            </button>
           </form>
         </>
       ) : (
         <>
-          <p className="lead">A 6-digit code was sent to {sent.to}.</p>
+          <p className="lead">A 6-digit code was sent to {sent.to}. It works for {LIMITS.codeMinutes} minutes.</p>
           <form className="form" onSubmit={save} noValidate>
             <Note tone="amber" icon="alert" title="Demo only">
               No real message is sent in this prototype. Your code is {sent.code}.
             </Note>
-            <Field label="Verification code">
-              <input type="text" inputMode="numeric" maxLength={6} value={code}
-                onChange={(ev) => { setCode(ev.target.value); setError(''); }} />
+            <Field label="Verification code" error={errors.code}>
+              <input type="text" inputMode="numeric" pattern="[0-9]*" autoComplete="one-time-code" maxLength={6} value={code}
+                disabled={used}
+                onChange={(ev) => { setCode(digitsOnly(ev.target.value, 6)); clear('code'); }} />
             </Field>
-            <Field label="New password (min. 8 characters)">
-              <input type="password" value={password} onChange={(ev) => { setPassword(ev.target.value); setError(''); }} />
+            <Field label="New password" error={errors.password} hint="At least 8 characters, with a letter and a number.">
+              <input type="password" value={password} maxLength={LIMITS.password.max} autoComplete="new-password"
+                onChange={(ev) => { setPassword(ev.target.value); clear('password'); }}
+                onBlur={() => password && setErrors({ ...errors, password: passwordError(password, { username: agency.username, previous: agency.password }) || undefined })} />
             </Field>
-            <Field label="Repeat new password">
-              <input type="password" value={again} onChange={(ev) => { setAgain(ev.target.value); setError(''); }} />
+            <Field label="Confirm new password" error={errors.again}>
+              <input type="password" value={again} maxLength={LIMITS.password.max} autoComplete="new-password"
+                onChange={(ev) => { setAgain(ev.target.value); clear('again'); }}
+                onBlur={() => again && setErrors({ ...errors, again: confirmError(password, again) || undefined })} />
             </Field>
-            {error && <Note tone="red" icon="alert">{error}</Note>}
-            <button className="btn primary block">Change password</button>
-            <button type="button" className="btn block" onClick={() => { setStep(1); setError(''); }}>
-              Send a new code
+            <button className="btn primary block" disabled={used}>Change password</button>
+            <button type="button" className="btn block" disabled={wait > 0} onClick={() => sendCode()}>
+              {wait > 0 ? `Send a new code in ${wait}s` : 'Send a new code'}
             </button>
           </form>
         </>

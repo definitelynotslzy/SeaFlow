@@ -261,8 +261,12 @@ export function Field({ label, error, hint, className = '', children }) {
   );
 }
 
-/** Simulated file attachment: only the file name is kept. */
-export function FilePick({ file, onPick, onRemove, empty = 'No file attached', pickLabel = 'Upload' }) {
+/**
+ * File attachment. Only the file name is kept, but onPick also receives the
+ * picked file itself so the form can check its type and size first.
+ * `accept` limits what the file window offers; it is only a hint to the browser.
+ */
+export function FilePick({ file, onPick, onRemove, empty = 'No file attached', pickLabel = 'Upload', accept = 'application/pdf,image/*' }) {
   const input = useRef(null);
   return (
     <div className="filerow">
@@ -278,11 +282,11 @@ export function FilePick({ file, onPick, onRemove, empty = 'No file attached', p
       <input
         ref={input}
         type="file"
-        accept="application/pdf,image/*"
+        accept={accept}
         hidden
         onChange={(ev) => {
           const f = ev.target.files[0];
-          if (f) onPick(f.name);
+          if (f) onPick(f.name, f);
           ev.target.value = '';
         }}
       />

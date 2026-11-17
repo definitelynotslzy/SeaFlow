@@ -14,6 +14,10 @@ import {
 import { Person } from './Shared.jsx';
 import { createClinicAccount } from '../createClinicAccount.js';
 import { useAgencyRequests } from "../useAgencyRequests.js";
+import {
+  LIMITS, nameError, usernameError, passwordError, confirmError, statusReasonError, noteError,
+  networkError, normalizeNetwork, agencyKey, friendlyError,
+} from '../validators.js';
 
 
 const DAY = 24 * 3600e3;
@@ -118,6 +122,7 @@ const NEW_USER = {
   name: '',
   username: '',
   password: '',
+  again: '',
   role: 'Clinic Staff',
   duty: 'Both'
 };
@@ -167,36 +172,48 @@ useEffect(() => {
   const [f, setF] = useState(NEW_USER);
   const [value, setValue] = useState('');
   const [errors, setErrors] = useState({});
-  const set = (k) => (ev) => setF({ ...f, [k]: ev.target.value });
+  const [saving, setSaving] = useState(false);
+  const set = (k) => (ev) => {
+    setF({ ...f, [k]: ev.target.value });
+    if (errors[k] || errors.form) setErrors({ ...errors, [k]: undefined, form: undefined }); // editing clears the error
+  };
   const open = (type, user) => { setDialog({ type, user }); setValue(''); setErrors({}); setF(NEW_USER); };
   const close = () => setDialog(null);
 
   // Clinic staff do not register themselves: the admin creates each account.
+  // One rule per field of the new-account form, so each can also run when the user leaves the field.
+  const ACCOUNT_RULES = {
+    name: () => nameError(f.name),
+    username: () => usernameError(f.username),
+    password: () => passwordError(f.password, { username: f.username }),
+    again: () => confirmError(f.password, f.again),
+  };
+  const blur = (k) => () => {
+    if (!String(f[k]).trim()) return;
+    const next = { ...errors, [k]: ACCOUNT_RULES[k]() || undefined };
+    if (k === 'password' && f.again) next.again = ACCOUNT_RULES.again() || undefined;
+    setErrors(next);
+  };
+
 const create = async () => {
+  if (saving) return;
+
   const e = {};
-  const username = f.username.trim().toLowerCase();
-
-  if (!f.name.trim()) {
-    e.name = "Enter the full name.";
-  }
-
-  if (!username) {
-    e.username = "Enter a username.";
-  } else if (!/^[a-z0-9._-]+$/.test(username)) {
-    e.username = "Use letters, numbers, dots, underscores or hyphens only.";
-  }
-
-  if (f.password.length < 8) {
-    e.password = "Use at least 8 characters.";
-  }
+  Object.keys(ACCOUNT_RULES).forEach((k) => {
+    const problem = ACCOUNT_RULES[k]();
+    if (problem) e[k] = problem;
+  });
 
   setErrors(e);
   if (Object.keys(e).length) return;
 
+  setSaving(true);
+
   try {
+    // Only Clinic Staff accounts are created here, so the role is fixed.
     await createClinicAccount({
       name: f.name,
-      username,
+      username: f.username,
       password: f.password,
       role: "Clinic Staff"
     });
@@ -206,31 +223,51 @@ const create = async () => {
 
   } catch (error) {
     console.error("Create account failed:", error);
-    setErrors({
-      username: error.message || "Unable to create account."
-    });
+    const message = friendlyError(error, "Unable to create the account. Please try again.");
+    setErrors(/username/i.test(message) ? { username: message } : { form: message });
+  } finally {
+    setSaving(false);
   }
 };
 
 
   const resetPassword = () => {
-    if (value.length < 8) return setErrors({ value: 'Use at least 8 characters.' });
+    const e = {};
+    const problem = passwordError(value, { username: dialog.user.username, previous: dialog.user.password });
+    if (problem) e.value = problem;
+    const match = confirmError(value, f.again);
+    if (match) e.again = match;
+    if (Object.keys(e).length) return setErrors(e);
     dispatch({ type: 'resetUser', id: dialog.user.id, password: value });
     toast(`New password set for ${dialog.user.name}. Give it to them directly.`);
     return close();
   };
 
 const deactivate = async () => {
-  if (!value.trim()) {
+  const target = dialog.user;
+  const activeAdmins = firebaseUsers.filter(
+    (u) => u.role === "Clinic Admin" && u.status === "Active"
+  );
+
+  // An admin cannot lock themselves out, and the clinic must keep one active admin.
+  if (target.id === state.session.userId) {
+    return setErrors({ value: "You cannot deactivate your own account." });
+  }
+
+  if (target.role === "Clinic Admin" && activeAdmins.length <= 1) {
     return setErrors({
-      value: "Give a reason for deactivating this account."
+      value: "This is the only active Clinic Admin. Add another admin before deactivating this account."
     });
+  }
+
+  if (statusReasonError(value)) {
+    return setErrors({ value: statusReasonError(value) });
   }
 
   try {
     await updateDoc(doc(db, "users", dialog.user.id), {
       status: "Deactivated",
-      statusReason: value.trim()
+      statusReason: value.trim().replace(/\s+/g, " ")
     });
 
     toast(`${dialog.user.name} deactivated`);
@@ -238,7 +275,7 @@ const deactivate = async () => {
   } catch (error) {
     console.error("Deactivate failed:", error);
     setErrors({
-      value: error.message || "Unable to deactivate account."
+      value: friendlyError(error, "Unable to deactivate the account. Please try again.")
     });
   }
 };
@@ -334,22 +371,30 @@ const activate = async (u) => {
           footer={(
             <>
               <button className="btn" onClick={close}>Cancel</button>
-              <button className="btn primary" onClick={create}>Create account</button>
+              <button className="btn primary" disabled={saving} onClick={create}>{saving ? 'Creating...' : 'Create account'}</button>
             </>
           )}
         >
+          {errors.form && <Note tone="red" icon="alert">{errors.form}</Note>}
           <Field label="Full name *" error={errors.name}>
-            <input type="text" value={f.name} placeholder="e.g. Maria Santos" onChange={set('name')} />
+            <input type="text" value={f.name} maxLength={LIMITS.name.max} autoComplete="off" placeholder="e.g. Maria Santos"
+              onChange={set('name')} onBlur={blur('name')} />
           </Field>
           <div className="form-grid">
-            <Field label="Username *" error={errors.username}>
-              <input type="text" value={f.username} autoCapitalize="none" placeholder="e.g. msantos" onChange={set('username')} />
+            <Field label="Username *" error={errors.username} hint="3 to 50 characters, starting with a letter.">
+              <input type="text" value={f.username} maxLength={LIMITS.username.max} autoCapitalize="none" spellCheck={false}
+                autoComplete="off" placeholder="e.g. msantos" onChange={set('username')} onBlur={blur('username')} />
             </Field>
-            <Field label="Temporary password *" error={errors.password}>
-              <input type="password" value={f.password} placeholder="At least 8 characters" onChange={set('password')} />
+            <Field label="Role" hint="Only Clinic Staff accounts are created here.">
+              <input type="text" value="Clinic Staff" readOnly tabIndex={-1} />
             </Field>
-            <Field label="Role">
-              <Select value={f.role} onChange={(role) => setF({ ...f, role })} options={['Clinic Staff', 'Clinic Admin']} />
+            <Field label="Temporary password *" error={errors.password} hint="At least 8 characters, with a letter and a number.">
+              <input type="password" value={f.password} maxLength={LIMITS.password.max} autoComplete="new-password"
+                onChange={set('password')} onBlur={blur('password')} />
+            </Field>
+            <Field label="Confirm password *" error={errors.again}>
+              <input type="password" value={f.again} maxLength={LIMITS.password.max} autoComplete="new-password"
+                onChange={set('again')} onBlur={blur('again')} />
             </Field>
           </div>
         </Modal>
@@ -367,8 +412,12 @@ const activate = async (u) => {
             </>
           )}
         >
-          <Field label="New temporary password (min. 8 characters)" error={errors.value}>
-            <input type="text" value={value} onChange={(ev) => { setValue(ev.target.value); setErrors({}); }} />
+          <Field label="New temporary password *" error={errors.value} hint="At least 8 characters, with a letter and a number.">
+            <input type="password" value={value} maxLength={LIMITS.password.max} autoComplete="new-password"
+              onChange={(ev) => { setValue(ev.target.value); setErrors({}); }} />
+          </Field>
+          <Field label="Confirm password *" error={errors.again}>
+            <input type="password" value={f.again} maxLength={LIMITS.password.max} autoComplete="new-password" onChange={set('again')} />
           </Field>
         </Modal>
       )}
@@ -386,7 +435,8 @@ const activate = async (u) => {
           )}
         >
           <Field label="Reason for deactivating *" error={errors.value}>
-            <textarea value={value} placeholder="e.g. Resigned, on extended leave" onChange={(ev) => { setValue(ev.target.value); setErrors({}); }} />
+            <textarea value={value} maxLength={LIMITS.statusReason.max} placeholder="e.g. Resigned from the clinic last week"
+              onChange={(ev) => { setValue(ev.target.value); setErrors({}); }} />
           </Field>
         </Modal>
       )}
@@ -438,7 +488,7 @@ const total = (id) =>
       console.error(`Agency could not be ${verb}:`, err);
       const message = err.code === 'permission-denied'
         ? 'Permission denied. Check that your admin account may update agencies in the Firestore rules.'
-        : err.message || 'Unable to save the change.';
+        : friendlyError(err, 'Unable to save the change. Please try again.');
       setError(message);
       toast(message);
       return false;
@@ -448,8 +498,8 @@ const total = (id) =>
   };
 
   const suspend = async () => {
-    if (!reason.trim()) return setError('Give a reason for suspending this agency.');
-    if (await saveStatus(suspending, 'Suspended', 'suspended', reason.trim())) setSuspending(null);
+    if (statusReasonError(reason)) return setError(statusReasonError(reason));
+    if (await saveStatus(suspending, 'Suspended', 'suspended', reason.trim().replace(/\s+/g, ' '))) setSuspending(null);
     return undefined;
   };
 
@@ -465,7 +515,7 @@ const total = (id) =>
       )}
       <div className="toolbar" style={{ marginTop: requests.length ? 24 : 0 }}>
         <Field label="Search" className="grow">
-          <input type="search" value={q} placeholder="Search agencies" onChange={(ev) => setQ(ev.target.value)} />
+          <input type="search" value={q} maxLength={100} placeholder="Search agencies" onChange={(ev) => setQ(ev.target.value)} />
         </Field>
       </div>
       <Card flush>
@@ -519,7 +569,8 @@ const total = (id) =>
           )}
         >
           <Field label="Reason for suspending *" error={error}>
-            <textarea value={reason} placeholder="e.g. Accreditation expired" onChange={(ev) => { setReason(ev.target.value); setError(''); }} />
+            <textarea value={reason} maxLength={LIMITS.statusReason.max} placeholder="e.g. Accreditation expired in March"
+              onChange={(ev) => { setReason(ev.target.value); setError(''); }} />
           </Field>
         </Modal>
       )}
@@ -531,15 +582,40 @@ function Policy() {
   const { state, dispatch } = useStore();
   const { toast } = useNav();
   const [p, setP] = useState(state.policy);
+  const [error, setError] = useState('');
+  const [confirming, setConfirming] = useState(false);
+
+  const networkChanged = normalizeNetwork(p.network) !== normalizeNetwork(state.policy.network);
+
+  const save = () => {
+    const problem = networkError(p.network);
+    if (problem) return setError(problem);
+    // A wrong network locks every staff member out of the full view, so a change is confirmed first.
+    if (networkChanged && !confirming) return setConfirming(true);
+    const policy = { ...p, network: normalizeNetwork(p.network) };
+    dispatch({ type: 'savePolicy', policy });
+    setP(policy);
+    setConfirming(false);
+    return toast('Access policy saved');
+  };
 
   return (
     <>
       <Intro title="Access policy" sub="Rules for viewing patient information and for idle sessions." />
       <Card className="narrow">
         <div className="form">
-          <Field label="Clinic network (public IP or range)" hint="Staff on this network see full patient details.">
-            <input type="text" value={p.network} onChange={(ev) => setP({ ...p, network: ev.target.value })} />
+          <Field label="Clinic network (public IP or range) *" error={error}
+            hint="Staff on this network see full patient details. Separate several entries with commas, e.g. 203.0.113.24, 203.0.113.0/24.">
+            <input type="text" value={p.network} maxLength={LIMITS.network.max} autoComplete="off" spellCheck={false}
+              onChange={(ev) => { setP({ ...p, network: ev.target.value }); setError(''); setConfirming(false); }}
+              onBlur={() => setError(networkError(p.network))} />
           </Field>
+          {confirming && (
+            <Note tone="amber" icon="alert" title="Check before saving">
+              You are changing the clinic network. If the new value does not include the clinic's current public IP
+              address, every staff member loses the full view. Click Save policy again to confirm.
+            </Note>
+          )}
           <div className="form-grid">
             <Field label="Break-glass access duration">
               <Select
@@ -558,9 +634,7 @@ function Policy() {
           </div>
         </div>
         <div className="card-foot">
-          <button className="btn primary" onClick={() => { dispatch({ type: 'savePolicy', policy: p }); toast('Access policy saved'); }}>
-            Save policy
-          </button>
+          <button className="btn primary" onClick={save}>Save policy</button>
         </div>
       </Card>
     </>
@@ -598,6 +672,11 @@ export function AgencyRequest({ id }) {
 
   const a = requests.find((item) => item.id === id);
 
+  // Another agency with the same name, ignoring case and endings such as "Inc." or "Corp."
+  const twin = a && requests.find(
+    (item) => item.id !== a.id && item.status !== "Rejected" && agencyKey(item.name) && agencyKey(item.name) === agencyKey(a.name)
+  );
+
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState("");
   const [error, setError] = useState("");
@@ -619,7 +698,7 @@ export function AgencyRequest({ id }) {
       back();
     } catch (err) {
       console.error("Agency approval failed:", err);
-      setError(err.message || "Unable to approve agency.");
+      setError(friendlyError(err, "Unable to approve the agency. Please try again."));
     } finally {
       setSaving(false);
     }
@@ -628,8 +707,8 @@ export function AgencyRequest({ id }) {
   const reject = async () => {
     if (!a || saving) return;
 
-    if (!reason.trim()) {
-      return setError("Give a reason for rejecting.");
+    if (statusReasonError(reason)) {
+      return setError(statusReasonError(reason));
     }
 
     setSaving(true);
@@ -638,14 +717,14 @@ export function AgencyRequest({ id }) {
     try {
       await updateDoc(doc(db, "agencyRequests", id), {
         status: "Rejected",
-        statusReason: reason.trim()
+        statusReason: reason.trim().replace(/\s+/g, " ")
       });
 
       toast(`${a.name} rejected`);
       back();
     } catch (err) {
       console.error("Agency rejection failed:", err);
-      setError(err.message || "Unable to reject agency.");
+      setError(friendlyError(err, "Unable to reject the agency. Please try again."));
     } finally {
       setSaving(false);
     }
@@ -698,6 +777,12 @@ export function AgencyRequest({ id }) {
       </Intro>
 
       <div className="narrow">
+        {twin && (
+          <Note tone="amber" icon="alert" title="Possible duplicate agency">
+            {twin.name} is already on record ({twin.status}). Check that this is not the same agency registering twice.
+          </Note>
+        )}
+
         <AgencyPanels a={a} />
 
         {error && (
@@ -735,6 +820,8 @@ export function AgencyRequest({ id }) {
           <Field label="Reason for rejecting *" error={error}>
             <textarea
               value={reason}
+              maxLength={LIMITS.statusReason.max}
+              placeholder="e.g. The agency is not on the accredited list"
               onChange={(ev) => {
                 setReason(ev.target.value);
                 setError("");
@@ -924,7 +1011,8 @@ export function BreakGlassReview({ id }) {
   const [error, setError] = useState('');
 
   const finish = (status) => {
-    if (status === 'Flagged' && !note.trim()) return setError('A review note is required to flag.');
+    if (status === 'Flagged' && noteError(note, { what: 'review note' })) return setError(noteError(note, { what: 'review note' }));
+    if (note.trim().length > LIMITS.note.max) return setError(`Keep the note within ${LIMITS.note.max} characters.`);
     dispatch({ type: 'reviewBreakGlass', id, status, note: note.trim() });
     toast(status === 'Flagged' ? 'Flagged as inappropriate' : 'Marked as reviewed');
     return back();
@@ -948,7 +1036,7 @@ export function BreakGlassReview({ id }) {
         </Card>
         <Card title="Your review">
           <Field label="Review note (required to flag)" error={error}>
-            <textarea value={note} placeholder="Add a note for the record" onChange={(ev) => { setNote(ev.target.value); setError(''); }} />
+            <textarea value={note} maxLength={LIMITS.note.max} placeholder="Say why this access was or was not justified" onChange={(ev) => { setNote(ev.target.value); setError(''); }} />
           </Field>
           <div className="card-foot">
             <button className="btn primary" onClick={() => finish('Reviewed')}>Mark as reviewed</button>

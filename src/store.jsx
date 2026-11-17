@@ -51,6 +51,12 @@ export const fmtDate = (iso) =>
 
 export const refOf = (n) => `SF-2026-${String(n).padStart(4, '0')}`;
 
+/** The agency's medical report and billing contact, or {} when the agency is not loaded yet. */
+export const agencyBilling = (state, id) =>
+  state.firebaseAgencies?.[id]?.billing ??
+  state.agencies.find((a) => a.id === id)?.billing ??
+  {};
+
 export const agencyName = (state, id) =>
   state.firebaseAgencies?.[id]?.agencyName ??
   state.agencies.find((a) => a.id === id)?.name ??
@@ -448,7 +454,7 @@ case 'logout':
     // It appears in the timeline as its own entry, at the time it was sent.
     case 'sendBilling': {
       const e = find(a.id);
-      const contact = s.agencies.find((g) => g.id === e.agencyId).billing;
+      const contact = agencyBilling(s, e.agencyId);
       return {
         ...s,
         endorsements: patch(a.id, (x) => ({

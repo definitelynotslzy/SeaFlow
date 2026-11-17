@@ -5,6 +5,7 @@ import { db } from '../firebase.js';
 import { useStore, myAlerts, stamp, fmtDate, isClosed, visitsOf, agencyName, hasBreakGlass, ROLE_LABEL } from '../store.jsx';
 import { Shell, Intro, Card, Chip, Field, Details, FileRow, Note, Empty, Icon, Modal, useNav } from '../ui.jsx';
 import { logoutUser } from "../logout.js";
+import { LIMITS, PROFILE_RULES, profileErrors, cleanProfile, clean, friendlyError } from '../validators.js';
 
 
 /** Seafarer name with position and vessel underneath (first column of most tables). */
@@ -205,6 +206,7 @@ function AgencyProfile({ onSignOut }) {
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const [errors, setErrors] = useState({});
 
   const [f, setF] = useState({
     address: "",
@@ -274,21 +276,38 @@ function AgencyProfile({ onSignOut }) {
       ...prev,
       [k]: ev.target.value,
     }));
+    setSaveError("");
+    if (errors[k]) setErrors({ ...errors, [k]: undefined }); // editing clears the error
   };
 
+  // Each field is checked as soon as the user leaves it.
+  const blur = (k) => () => {
+    setErrors({ ...errors, [k]: PROFILE_RULES[k](f) || undefined });
+  };
+
+  // Save stays off until something is really different from what is stored.
+  const stored = blank(agency);
+  const changed = Object.keys(stored).some((k) => clean(f[k]) !== clean(stored[k]));
+
   const save = async () => {
-    if (!agency || saving) return;
+    if (!agency || saving || !changed) return;
+
+    const problems = profileErrors(f);
+    setErrors(problems);
+    if (Object.keys(problems).length) return;
 
     setSaving(true);
     setSaveError("");
 
     try {
+      const details = cleanProfile(f); // trimmed, emails in lowercase, numbers as 09XXXXXXXXX
+
       const changes = {
-        address: f.address.trim(),
-        "authorized.contact": f.authContact.trim(),
-        "authorized.email": f.authEmail.trim(),
-        "billing.contact": f.billContact.trim(),
-        "billing.email": f.billEmail.trim(),
+        address: details.address,
+        "authorized.contact": details.authContact,
+        "authorized.email": details.authEmail,
+        "billing.contact": details.billContact,
+        "billing.email": details.billEmail,
       };
 
       await updateDoc(
@@ -310,7 +329,7 @@ function AgencyProfile({ onSignOut }) {
     } catch (error) {
       console.error("Unable to update agency profile:", error);
       setSaveError(
-        error.message || "Unable to save changes."
+        friendlyError(error, "Unable to save changes. Please try again.")
       );
     } finally {
       setSaving(false);
@@ -357,6 +376,7 @@ function AgencyProfile({ onSignOut }) {
           onClick={() => {
             setF(blank(a));
             setSaveError("");
+            setErrors({});
             setEditing(true);
           }}
         >
@@ -423,7 +443,7 @@ function AgencyProfile({ onSignOut }) {
               </button>
               <button
                 className="btn primary"
-                disabled={saving}
+                disabled={saving || !changed}
                 onClick={save}
               >
                 {saving ? "Saving..." : "Save changes"}
@@ -437,32 +457,38 @@ function AgencyProfile({ onSignOut }) {
             </Note>
           )}
 
-          <Field label="Address">
-            <input
-              type="text"
-              value={f.address}
-              onChange={set("address")}
-            />
-          </Field>
+          <Field label="Address *" error={errors.address}>
+              <input
+                type="text"
+                value={f.address}
+                onChange={set("address")}
+                onBlur={blur("address")}
+                maxLength={LIMITS.address.max} autoComplete="street-address"
+              />
+            </Field>
 
           <div className="form-grid">
             <h3 className="full">
               Authorized person: {a.authorized.name}
             </h3>
 
-            <Field label="Contact no.">
+            <Field label="Contact no. *" error={errors.authContact}>
               <input
                 type="tel"
                 value={f.authContact}
                 onChange={set("authContact")}
+                onBlur={blur("authContact")}
+                maxLength={16} inputMode="tel" autoComplete="tel" placeholder="09xx xxx xxxx"
               />
             </Field>
 
-            <Field label="Email address">
+            <Field label="Email address *" error={errors.authEmail}>
               <input
                 type="email"
                 value={f.authEmail}
                 onChange={set("authEmail")}
+                onBlur={blur("authEmail")}
+                maxLength={LIMITS.email.max} inputMode="email" autoCapitalize="none" autoComplete="email"
               />
             </Field>
 
@@ -470,19 +496,23 @@ function AgencyProfile({ onSignOut }) {
               Medical report and billing: {a.billing.name}
             </h3>
 
-            <Field label="Contact no.">
+            <Field label="Contact no. *" error={errors.billContact}>
               <input
                 type="tel"
                 value={f.billContact}
                 onChange={set("billContact")}
+                onBlur={blur("billContact")}
+                maxLength={16} inputMode="tel" autoComplete="tel" placeholder="09xx xxx xxxx"
               />
             </Field>
 
-            <Field label="Email address">
+            <Field label="Email address *" error={errors.billEmail}>
               <input
                 type="email"
                 value={f.billEmail}
                 onChange={set("billEmail")}
+                onBlur={blur("billEmail")}
+                maxLength={LIMITS.email.max} inputMode="email" autoCapitalize="none" autoComplete="email"
               />
             </Field>
           </div>
