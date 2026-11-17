@@ -43,13 +43,6 @@ export const LIMITS = {
 
 export const RESERVED_USERNAMES = ['admin', 'staff', 'clinic', 'support', 'demo'];
 
-/** Standard ranks offered as suggestions in the Position field. */
-export const RANKS = [
-  'Master', 'Chief Officer', '2nd Officer', '3rd Officer', 'Deck Cadet', 'Bosun', 'Able Seaman',
-  'Ordinary Seaman', 'Chief Engineer', '2nd Engineer', '3rd Engineer', '4th Engineer', 'Engine Cadet',
-  'Electrician', 'Fitter', 'Oiler', 'Wiper', 'Pumpman', 'Chief Cook', '2nd Cook', 'Messman', 'Steward',
-];
-
 /* ------------------------------------------------------------------ */
 /* Normalizing                                                         */
 /* ------------------------------------------------------------------ */
@@ -343,7 +336,7 @@ const TYPES = {
 
 export const FILE_RULES = {
   referral: { types: ['pdf', 'jpg', 'png'], maxMb: LIMITS.referralMaxMb },
-  report: { types: ['pdf'], maxMb: LIMITS.reportMaxMb },
+  report: { types: ['pdf', 'jpg', 'png'], maxMb: LIMITS.reportMaxMb },
   billing: { types: ['pdf'], maxMb: LIMITS.billingMaxMb },
 };
 

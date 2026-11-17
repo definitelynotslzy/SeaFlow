@@ -300,7 +300,7 @@ function VisitDialog({ e, onClose }) {
   const [error, setError] = useState('');
   const next = visitsOf(e).length + 1;
 
-  // The report is checked when it is picked: PDF only, not empty, within the size limit.
+  // The report is checked when it is picked: PDF, JPG or PNG, not empty, within the size limit.
   const pickReport = (name, file) => {
     const problem = fileError(file, FILE_RULES.report);
     setReport(problem ? '' : name);
@@ -336,7 +336,7 @@ function VisitDialog({ e, onClose }) {
           <Select value={status} onChange={setStatus} options={UPDATE_STATUSES} />
         </Field>
         <div className="field">
-          <label><span>Medical report (PDF, up to {LIMITS.reportMaxMb} MB) *</span></label>
+          <label><span>Medical report (PDF, JPG or PNG, up to {LIMITS.reportMaxMb} MB) *</span></label>
           <FilePick file={report} accept={acceptOf(FILE_RULES.report)} empty="No medical report" onPick={pickReport} onRemove={() => setReport('')} />
           {error && <p className="err">{error}</p>}
         </div>
