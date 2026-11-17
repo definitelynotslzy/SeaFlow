@@ -1,13 +1,11 @@
 import { signOut } from "firebase/auth";
 import { auth } from "./firebase.js";
 
-export async function logoutUser(dispatch, role) {
+// Signs out of Firebase for every role (admin, staff and manning agency), so a
+// refresh after logging out opens the sign-in page instead of the old account.
+export async function logoutUser(dispatch) {
   try {
-    if (role === "admin" || role === "staff") {
-      await signOut(auth);
-      console.log("Firebase user after logout:", auth.currentUser);
-    }
-
+    await signOut(auth);
     dispatch({ type: "logout" });
     return true;
   } catch (error) {
