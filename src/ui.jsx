@@ -295,22 +295,32 @@ export function FilePick({ file, onPick, onRemove, empty = 'No file attached', p
 }
 
 /** A stored file with a View action (demo files have nothing to open). */
-export function FileRow({ label, file, locked }) {
+export function FileRow({ label, file, locked, record }) {
   const { toast } = useNav();
+  const { dispatch } = useStore();
   // locked: clinic staff outside the clinic network cannot open the file or see its name.
   if (locked) {
+    const tryOpen = () => {
+      dispatch({ type: 'logDenied', id: record, detail: `Tried to open the ${label.toLowerCase()} outside the clinic network` });
+      toast('Restricted outside the clinic network. Request break-glass access to open it.');
+    };
     return (
       <div className="filerow">
         <Icon name="lock" size={16} />
         <span>{label ? `${label}: ` : ''}restricted outside the clinic network</span>
+        <button className="link" onClick={tryOpen}>View</button>
       </div>
     );
   }
+  const open = () => {
+    dispatch({ type: 'logFile', id: record, label, file });
+    toast(`${file} is a demo file`);
+  };
   return (
     <div className="filerow">
       <Icon name="file" size={16} />
       <span>{label ? `${label}: ` : ''}{file}</span>
-      <button className="link" onClick={() => toast(`${file} is a demo file`)}>View</button>
+      <button className="link" onClick={open}>View</button>
     </div>
   );
 }

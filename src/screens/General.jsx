@@ -5,6 +5,7 @@ import { Shell, Field, Select, Note, Icon, useNav } from '../ui.jsx';
 import { loginClinicUser } from "../adminAuth.js";
 import { createAgencyRequest } from "../createAgencyRequest.js";
 import { loginAgency } from "../agencyAuth.js";
+import { writeSignInFailure } from "../auditLog.js";
 import {
   LIMITS, AGENCY_RULES, agencyRequestErrors, agencyKey, passwordError, confirmError, codeError, digitsOnly,
   friendlyError,
@@ -51,7 +52,7 @@ export function SignIn() {
     let clinicError;
     try {
       const session = await loginClinicUser(u, password);
-      dispatch({ type: 'login', session });
+      dispatch({ type: 'login', session, fresh: true });
       return;
     } catch (err) {
       clinicError = err;
@@ -65,7 +66,7 @@ export function SignIn() {
     if (notClinicAccount) {
       try {
         const session = await loginAgency(u, password);
-        dispatch({ type: 'login', session });
+        dispatch({ type: 'login', session, fresh: true });
         return;
       } catch (err) {
         // "Agency registration not found." means it was never an agency either,
@@ -76,6 +77,15 @@ export function SignIn() {
 
     console.error('Sign-in failed:', clinicError);
     setBusy(false);
+
+    // Record the failed attempt. A wrong username or password is a failed sign-in;
+    // an account that is suspended, deactivated or not yet approved is a blocked sign-in.
+    const credentialError = String(clinicError.code || '').startsWith('auth/');
+    writeSignInFailure(
+      u,
+      credentialError ? 'Failed sign-in' : 'Sign-in blocked',
+      friendlyError(clinicError, 'Unable to sign in.'),
+    );
 
     // Too many wrong tries: pause the form for a short while.
     const wrongPassword = ['auth/invalid-credential', 'auth/wrong-password', 'auth/user-not-found'].includes(clinicError.code);

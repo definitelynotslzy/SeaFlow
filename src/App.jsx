@@ -44,6 +44,16 @@ const SCREENS = {
 };
 
 const HOME = { agency: 'm.home', staff: 's.dash', admin: 'a.overview' };
+const OWN = { agency: 'm.', staff: 's.', admin: 'a.' };
+
+/** Records an attempt to open a screen that belongs to another role. */
+function BlockedScreen({ name }) {
+  const { dispatch } = useStore();
+  useEffect(() => {
+    dispatch({ type: 'logDenied', detail: `Tried to open a screen of another role (${name})` });
+  }, [name, dispatch]);
+  return null;
+}
 const PUBLIC = ['signin', 'g.request', 'g.submitted', 'g.forgot'];
 
 function Inner() {
@@ -107,13 +117,18 @@ timer = setTimeout(async () => {
   let top = stack[stack.length - 1];
   let depth = stack.length;
   const isPublic = PUBLIC.includes(top.name);
+  // Each role may open only its own screens (m. agency, s. clinic staff, a. clinic admin).
+  const wanted = top.name;
+  const blocked = !!role && /^[msa]\./.test(wanted) && !wanted.startsWith(OWN[role]);
   if (!role && !isPublic) { top = { name: 'signin', params: {} }; depth = 1; }
   if (role && isPublic) { top = { name: HOME[role], params: {} }; depth = 1; }
+  if (blocked) { top = { name: HOME[role], params: {} }; depth = 1; }
   const Screen = SCREENS[top.name];
 
   return (
     <div className="root">
       <NavCtx.Provider value={ctx}>
+        {blocked && <BlockedScreen name={wanted} />}
         <Screen key={`${depth}:${top.name}`} {...top.params} />
       </NavCtx.Provider>
       {toast && <div className="toast" role="status">{toast}</div>}

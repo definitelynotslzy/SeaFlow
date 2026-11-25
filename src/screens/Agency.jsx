@@ -236,6 +236,7 @@ const INPUT_PROPS = {
 /** New endorsement, in three sections, with the duplicate check. */
 export function NewEndorsement() {
   const { reset, back } = useNav();
+  const { dispatch } = useStore();
   const { agency, mine } = useMine();
   const [f, setF] = useState(BLANK);
   const [errors, setErrors] = useState({});
@@ -306,9 +307,13 @@ export function NewEndorsement() {
     try {
       const { confirm, ...data } = cleanEndorsement(f);
       const endorsement = await createEndorsement(data);
+      dispatch({ type: 'logAction', action: 'Submitted endorsement', id: endorsement.ref, note: `Patient: ${data.name} · ${data.vessel}` });
       reset('m.submitted', { id: endorsement.ref });
     } catch (error) {
       console.error('Endorsement submission failed:', error);
+      if (error.code === 'permission-denied') {
+        dispatch({ type: 'logDenied', detail: 'Firebase refused to save a new endorsement' });
+      }
       setErrors((prev) => ({
         ...prev,
         submit: error.code === 'permission-denied'

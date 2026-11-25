@@ -1,0 +1,395 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ==============================
+    // AUTHENTICATION HELPERS
+    // ==============================
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && exists(
+          /databases/$(database)/documents/users/$(request.auth.uid)
+        )
+        && get(
+          /databases/$(database)/documents/users/$(request.auth.uid)
+        ).data.role == "admin"
+        && get(
+          /databases/$(database)/documents/users/$(request.auth.uid)
+        ).data.status == "Active";
+    }
+
+    function isClinicUser() {
+      return signedIn()
+        && exists(
+          /databases/$(database)/documents/users/$(request.auth.uid)
+        )
+        && get(
+          /databases/$(database)/documents/users/$(request.auth.uid)
+        ).data.role in ["admin", "staff"]
+        && get(
+          /databases/$(database)/documents/users/$(request.auth.uid)
+        ).data.status == "Active";
+    }
+
+    function isApprovedAgency() {
+      return signedIn()
+        && exists(
+          /databases/$(database)/documents/agencyRequests/$(request.auth.uid)
+        )
+        && get(
+          /databases/$(database)/documents/agencyRequests/$(request.auth.uid)
+        ).data.status == "Approved";
+    }
+
+    // ==============================
+    // CLINIC USERS
+    // ==============================
+
+    match /users/{userId} {
+
+      allow get: if (
+        signedIn()
+        && request.auth.uid == userId
+      ) || isAdmin();
+
+      allow list: if isAdmin();
+
+      allow create: if isAdmin()
+        && request.resource.data.role == "staff"
+        && request.resource.data.status == "Active";
+
+      // Clinic Admin can deactivate/reactivate staff.
+      allow update: if isAdmin()
+        && resource.data.role == "staff"
+        && request.resource.data.role == "staff"
+        && resource.data.status in ["Active", "Deactivated"]
+        && request.resource.data.status in ["Active", "Deactivated"]
+        && request.resource.data.diff(resource.data)
+          .affectedKeys().hasOnly([
+            "status",
+            "statusReason"
+          ])
+        && request.resource.data.statusReason is string;
+
+      allow delete: if false;
+    }
+
+    // ==============================
+    // PATIENT ENDORSEMENTS
+    // ==============================
+
+    match /endorsements/{endorsementId} {
+
+      // Approved agencies can submit endorsements.
+      allow create: if isApprovedAgency()
+        && request.resource.data.agencyId == request.auth.uid
+        && request.resource.data.ref == endorsementId
+        && request.resource.data.patientCode ==
+          "PT-" + endorsementId
+        && request.resource.data.status == "Pending"
+        && request.resource.data.createdAt == request.time;
+
+      // Clinic users can view all endorsements.
+      // Agencies can view their own endorsements.
+      allow get, list: if isClinicUser()
+        || (
+          isApprovedAgency()
+          && resource.data.agencyId == request.auth.uid
+        );
+
+      // Clinic users can accept pending endorsements.
+      allow update: if isClinicUser()
+        && resource.data.status == "Pending"
+        && request.resource.data.status == "Accepted"
+        && request.resource.data.diff(resource.data)
+          .affectedKeys().hasOnly([
+            "status",
+            "cashBasis",
+            "turnaroundMin",
+            "timeline",
+            "acceptedAt",
+            "acceptedBy"
+          ])
+        && request.resource.data.cashBasis is bool
+        && request.resource.data.turnaroundMin is int
+        && request.resource.data.turnaroundMin >= 1
+        && request.resource.data.acceptedAt == request.time
+        && request.resource.data.acceptedBy == request.auth.uid
+        && request.resource.data.timeline is list
+        && request.resource.data.timeline.size() ==
+          resource.data.timeline.size() + 1
+        && request.resource.data.timeline[
+          request.resource.data.timeline.size() - 1
+        ].label == "Accepted";
+
+      allow delete: if false;
+    }
+
+    // ==============================
+    // MANNING AGENCY REQUESTS
+    // ==============================
+
+    match /agencyRequests/{requestId} {
+
+      // Admin/staff can view agency profiles.
+      // Agencies can view their own profile.
+      allow get: if isClinicUser()
+        || (
+          signedIn()
+          && request.auth.uid == requestId
+        );
+
+      // Only admin can list all agency requests.
+      allow list: if isAdmin();
+
+      // Agency registration.
+      allow create: if signedIn()
+        && request.auth.uid == requestId
+        && request.resource.data.keys().hasOnly([
+          "agencyName",
+          "address",
+          "authorized",
+          "billing",
+          "username",
+          "status",
+          "createdAt"
+        ])
+        && request.resource.data.keys().hasAll([
+          "agencyName",
+          "address",
+          "authorized",
+          "billing",
+          "username",
+          "status",
+          "createdAt"
+        ])
+        && request.resource.data.agencyName is string
+        && request.resource.data.agencyName.size() > 0
+        && request.resource.data.agencyName.size() <= 200
+        && request.resource.data.address is string
+        && request.resource.data.address.size() > 0
+        && request.resource.data.address.size() <= 500
+        && request.resource.data.username is string
+        && request.resource.data.username.matches(
+          '^[a-z0-9._-]{3,50}$'
+        )
+        && request.resource.data.authorized is map
+        && request.resource.data.billing is map
+        && request.resource.data.status == "Pending"
+        && request.resource.data.createdAt == request.time;
+
+      // Admin approves or rejects pending agencies.
+      // Admin suspends approved agencies and reactivates suspended ones.
+      // Approved agencies can edit their own contact details.
+      allow update: if (
+          isAdmin()
+          && request.resource.data.diff(resource.data)
+            .affectedKeys().hasOnly([
+              "status",
+              "statusReason"
+            ])
+          && request.resource.data.statusReason is string
+          && (
+            (resource.data.status == "Pending"
+              && request.resource.data.status in ["Approved", "Rejected"])
+            || (resource.data.status == "Approved"
+              && request.resource.data.status == "Suspended")
+            || (resource.data.status == "Suspended"
+              && request.resource.data.status == "Approved")
+          )
+        )
+        || (
+          signedIn()
+          && request.auth.uid == requestId
+          && resource.data.status == "Approved"
+          && request.resource.data.status == "Approved"
+          && request.resource.data.diff(resource.data)
+            .affectedKeys().hasOnly([
+              "address",
+              "authorized",
+              "billing"
+            ])
+          && request.resource.data.address is string
+          && request.resource.data.address.size() > 0
+          && request.resource.data.address.size() <= 500
+          && request.resource.data.authorized is map
+          && request.resource.data.billing is map
+          && request.resource.data.authorized
+            .diff(resource.data.authorized)
+            .affectedKeys().hasOnly([
+              "contact",
+              "email"
+            ])
+          && request.resource.data.billing
+            .diff(resource.data.billing)
+            .affectedKeys().hasOnly([
+              "contact",
+              "email"
+            ])
+          && request.resource.data.authorized.contact is string
+          && request.resource.data.authorized.email is string
+          && request.resource.data.billing.contact is string
+          && request.resource.data.billing.email is string
+        );
+
+      allow delete: if false;
+    }
+    
+    // ==============================
+    // CLINIC VISITS — metadata only
+    // ==============================
+    
+match /clinicVisits/{visitId} {
+  allow create: if isClinicUser()
+    && request.resource.data.keys().hasOnly([
+      "endorsementId", "agencyId", "status",
+      "report", "reportFile", "createdBy", "createdAt"
+    ])
+    && request.resource.data.keys().hasAll([
+      "endorsementId", "agencyId", "status",
+      "report", "reportFile", "createdBy", "createdAt"
+    ])
+    && request.resource.data.endorsementId is string
+    && request.resource.data.agencyId is string
+    && request.resource.data.status in [
+      "Treatment in Progress",
+      "Non-reporting Status",
+      "Fit to Work",
+      "Fit to Work with Disability",
+      "Reach Maximum Medical Improvement",
+      "Stop Treatment",
+      "Expired"
+    ]
+    && request.resource.data.report is string
+    && request.resource.data.report.size() > 0
+    && request.resource.data.report.size() <= 255
+    && request.resource.data.reportFile is map
+    && request.resource.data.reportFile.keys().hasOnly([
+      "path", "name", "contentType"
+    ])
+    && request.resource.data.reportFile.keys().hasAll([
+      "path", "name", "contentType"
+    ])
+    && request.resource.data.reportFile.path is string
+    && request.resource.data.reportFile.path.matches(
+      "^endorsements/" +
+      request.resource.data.endorsementId +
+      "/medical-reports/" +
+      visitId +
+      "/[A-Za-z0-9_-]+\\.(pdf|jpg|png)$"
+    )
+    && request.resource.data.reportFile.name is string
+    && request.resource.data.reportFile.name.size() > 0
+    && request.resource.data.reportFile.name.size() <= 255
+    && request.resource.data.reportFile.contentType in [
+      "application/pdf", "image/jpeg", "image/png"
+    ]
+    && request.resource.data.report ==
+      request.resource.data.reportFile.name
+    && request.resource.data.createdBy == request.auth.uid
+    && request.resource.data.createdAt == request.time
+    && exists(
+      /databases/$(database)/documents/endorsements/$(request.resource.data.endorsementId)
+    )
+    && get(
+      /databases/$(database)/documents/endorsements/$(request.resource.data.endorsementId)
+    ).data.agencyId == request.resource.data.agencyId
+    && get(
+      /databases/$(database)/documents/endorsements/$(request.resource.data.endorsementId)
+    ).data.status in [
+      "Accepted",
+      "Treatment in Progress",
+      "Non-reporting Status"
+    ];
+
+  allow get, list: if isClinicUser() ||
+    (
+      isApprovedAgency() &&
+      resource.data.agencyId == request.auth.uid
+    );
+
+  allow update, delete: if false;
+}
+
+
+    // ==============================
+    // BILLING STATEMENTS — one per visit
+    // ==============================
+    match /billingStatements/{billingId} {
+      allow create: if isClinicUser()
+        && request.resource.data.keys().hasOnly([
+          "endorsementId", "agencyId", "visitId", "file", "createdBy", "createdAt"
+        ])
+        && request.resource.data.keys().hasAll([
+          "endorsementId", "agencyId", "visitId", "file", "createdBy", "createdAt"
+        ])
+        && request.resource.data.visitId == billingId
+        && request.resource.data.visitId is string
+        && request.resource.data.endorsementId is string
+        && request.resource.data.agencyId is string
+        && request.resource.data.file is string
+        && request.resource.data.file.size() > 0
+        && request.resource.data.file.size() <= 255
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && exists(/databases/$(database)/documents/clinicVisits/$(billingId))
+        && get(/databases/$(database)/documents/clinicVisits/$(billingId)).data.endorsementId == request.resource.data.endorsementId
+        && get(/databases/$(database)/documents/clinicVisits/$(billingId)).data.agencyId == request.resource.data.agencyId;
+      allow get, list: if isClinicUser() ||
+        (isApprovedAgency() && resource.data.agencyId == request.auth.uid);
+      allow update, delete: if false;
+    }
+
+    // ==============================
+    // AUDIT LOG
+    // Anyone signed in can add an entry about themselves.
+    // Someone not signed in can only add a failed or blocked sign-in.
+    // Only the clinic admin can read it. Nobody can change or delete an entry.
+    // ==============================
+
+    function auditEntryIsValid() {
+      let d = request.resource.data;
+      return d.keys().hasOnly([
+          "actorId", "actorName", "actorType", "role", "action",
+          "record", "details", "outcome", "network", "createdAt"
+        ])
+        && d.createdAt == request.time
+        && d.action is string && d.action.size() > 0 && d.action.size() <= 60
+        && d.actorName is string && d.actorName.size() <= 200
+        && d.record is string && d.record.size() <= 50
+        && d.details is string && d.details.size() <= 1000
+        && d.network is string && d.network.size() <= 60
+        && d.outcome in ["allowed", "denied"];
+    }
+
+    function auditIsOwnEntry() {
+      let d = request.resource.data;
+      return signedIn()
+        && d.actorId == request.auth.uid
+        && ((d.actorType == "clinic" && isClinicUser())
+          || (d.actorType == "agency" && isApprovedAgency()));
+    }
+
+    function auditIsSignInFailure() {
+      let d = request.resource.data;
+      return !signedIn()
+        && d.actorId == ""
+        && d.actorType == "unknown"
+        && d.outcome == "denied"
+        && d.action in ["Failed sign-in", "Sign-in blocked"];
+    }
+
+    match /auditLogs/{entryId} {
+      allow read: if isAdmin();
+      allow create: if auditEntryIsValid()
+        && (auditIsOwnEntry() || auditIsSignInFailure());
+      allow update, delete: if false;
+    }
+  }
+}

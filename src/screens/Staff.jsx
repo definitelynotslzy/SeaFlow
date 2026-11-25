@@ -189,6 +189,12 @@ const accept = async (e, cash) => {
   try {
     if (e.source === "firebase") {
       await acceptFirebaseEndorsement(e.ref, cash);
+      dispatch({
+        type: 'logAction',
+        action: 'Accepted endorsement',
+        id: e.ref,
+        note: `Patient: ${e.name}${cash ? ' · Cash basis (self-pay)' : ''}`,
+      });
     } else {
       dispatch({
         type: "accept",
@@ -204,6 +210,7 @@ const accept = async (e, cash) => {
     );
   } catch (error) {
     console.error("Accept failed:", error);
+    if (error.code === 'permission-denied') dispatch({ type: 'logDenied', id: e.ref, detail: 'Firebase refused to accept an endorsement' });
     toast(error.message || "Unable to accept endorsement.");
   } finally {
     setAcceptingId(null);
@@ -238,7 +245,7 @@ const accept = async (e, cash) => {
                 ['Case', e.case],
               ]}
             />
-            <FileRow label="Referral letter" file={e.referral} locked={!state.insideNetwork && !hasBreakGlass(state, e.ref)} />
+            <FileRow label="Referral letter" file={e.referral} locked={!state.insideNetwork && !hasBreakGlass(state, e.ref)} record={e.ref} />
             <div className="rec-f">
               <button
   className="btn primary sm"

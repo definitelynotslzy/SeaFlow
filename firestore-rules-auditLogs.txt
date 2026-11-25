@@ -1,0 +1,54 @@
+// SeaFlow audit log: Firestore security rules
+//
+// Paste everything below INSIDE your existing block
+//     match /databases/{database}/documents {
+//       ...  <-- here, next to your other "match" blocks
+//     }
+// in Firebase console > Firestore Database > Rules, then click Publish.
+//
+// What these rules do:
+//   - Any signed-in clinic user or manning agency can ADD an entry about themselves.
+//   - Someone who is not signed in can only add a "Failed sign-in" or "Sign-in blocked" entry.
+//   - Only the clinic admin can READ the audit log.
+//   - Nobody, not even the clinic admin, can CHANGE or DELETE an entry.
+
+    function auditIsClinicAdmin() {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    function auditEntryIsValid() {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['actorId', 'actorName', 'actorType', 'role', 'action', 'record',
+                               'details', 'outcome', 'network', 'createdAt'])
+        && d.createdAt == request.time
+        && d.action is string && d.action.size() > 0 && d.action.size() <= 60
+        && d.details is string && d.details.size() <= 500
+        && d.outcome in ['allowed', 'denied'];
+    }
+
+    function auditIsOwnEntry() {
+      let d = request.resource.data;
+      return request.auth != null
+        && d.actorId == request.auth.uid
+        && ((d.actorType == 'clinic'
+               && exists(/databases/$(database)/documents/users/$(request.auth.uid)))
+            || (d.actorType == 'agency'
+               && exists(/databases/$(database)/documents/agencyRequests/$(request.auth.uid))));
+    }
+
+    function auditIsSignInFailure() {
+      let d = request.resource.data;
+      return request.auth == null
+        && d.actorId == ''
+        && d.actorType == 'unknown'
+        && d.outcome == 'denied'
+        && d.action in ['Failed sign-in', 'Sign-in blocked'];
+    }
+
+    match /auditLogs/{entryId} {
+      allow read: if auditIsClinicAdmin();
+      allow create: if auditEntryIsValid() && (auditIsOwnEntry() || auditIsSignInFailure());
+      allow update, delete: if false;
+    }
