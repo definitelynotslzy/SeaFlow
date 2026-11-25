@@ -1,7 +1,7 @@
 // Central state for the SeaFlow prototype.
 // Everything lives in memory (useReducer + context). Replace the reducer
 // actions with API calls when a real backend is added.
-import { createContext, useContext, useReducer, useEffect, useState } from 'react';
+import { createContext, useContext, useReducer, useEffect, useRef, useState } from 'react';
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import {
   doc,
@@ -12,6 +12,7 @@ import {
   onSnapshot,
 } from "firebase/firestore";
 import { auth, db } from "./firebase.js";
+import { writeAudit } from "./auditLog.js";
 
 /* ---------- constants ---------- */
 
@@ -261,7 +262,7 @@ const endorsements = [];
       { id: 1, to: 'admin', text: 'New agency access request from Island Spirit Crewing Corp.', ms: NOW - 12 * HOUR },
     ],
     breakGlass: [],
-    // The audit log records clinic users only (staff and admin).
+    // Sample entries for the demo; real entries are saved in Firebase and shown from there.
     audit: [
       { id: 2, who: 'R. Santos', role: 'Clinic Staff', action: 'Accepted endorsement', ref: juan.ref, ms: juan.timeline[1].ms, note: 'Patient: Juan Dela Cruz · Pacific Crew Manning Agency' },
       { id: 1, who: 'R. Santos', role: 'Clinic Staff', action: 'Viewed record', ref: juan.ref, ms: juan.timeline[1].ms - 60e3, note: 'Patient: Juan Dela Cruz' },
@@ -275,12 +276,26 @@ function reducer(s, a) {
   const me = a.type === 'login' ? a.session : s.session;
   const now = Date.now();
 
-  // Agency activity is not written to the audit log.
+  // Every user's activity is written to the audit log: clinic staff, clinic admin and manning agencies.
   // `base` lets one action add several entries (a visit logs its report and its billing).
-  const audit = (action, id = '—', note, base = s.audit) => {
-    if (!me || me.role === 'agency') return base;
+  // `persist` marks the entry to be saved in Firebase (see StoreProvider).
+  const audit = (action, id = '—', note, base = s.audit, outcome = 'allowed') => {
+    if (!me) return base;
+    const agency = me.role === 'agency';
     return [
-      { id: base.length + 1, who: me.name, role: ROLE_LABEL[me.role], action, ref: id, ms: now, note },
+      {
+        id: `${now}-${base.length + 1}`,
+        who: me.name,
+        role: ROLE_LABEL[me.role],
+        actorType: agency ? 'agency' : 'clinic',
+        action,
+        ref: id,
+        ms: now,
+        note,
+        outcome,
+        network: agency ? 'Agency (outside the clinic)' : s.insideNetwork ? 'Inside clinic network' : 'Outside clinic network',
+        persist: true,
+      },
       ...base,
     ];
   };
@@ -339,7 +354,7 @@ case 'login':
     endorsements: s.endorsements.filter(
       (e) => e.source !== "firebase"
     ),
-    audit: audit('Signed in'),
+    audit: a.fresh ? audit('Signed in') : s.audit,
   };
 
 case 'logout':
@@ -410,6 +425,7 @@ case 'logout':
         ...s,
         endorsements: patch(a.id, (e) => ({ ...e, updateRequested: true })),
         alerts: alert(s.alerts, 'staff', `Medical update requested for ${a.id}.`),
+        audit: audit('Requested medical update', a.id, `Patient: ${find(a.id)?.name}`),
       };
 
     /* ----- clinic staff ----- */
@@ -472,7 +488,22 @@ case 'logout':
     }
 
     case 'logView':
-      return { ...s, audit: audit('Viewed record', a.id, `Patient: ${find(a.id)?.name}`) };
+      return {
+        ...s,
+        audit: audit(me?.role === 'agency' ? 'Viewed endorsement' : a.what || 'Viewed record', a.id, `Patient: ${find(a.id)?.name}`),
+      };
+
+    // Opening or downloading a file: referral letter, medical report or billing statement.
+    case 'logFile':
+      return { ...s, audit: audit('Downloaded file', a.id, `${a.label}: ${a.file} · Patient: ${find(a.id)?.name}`) };
+
+    // An action saved straight to Firebase by a screen (not through this store).
+    case 'logAction':
+      return { ...s, audit: audit(a.action, a.id || '—', a.note) };
+
+    // Something the user tried to do but was not allowed to.
+    case 'logDenied':
+      return { ...s, audit: audit('Access denied', a.id || '—', a.detail, s.audit, 'denied') };
 
     case 'breakGlass': {
       const minutes = s.policy.breakGlassMinutes;
@@ -550,6 +581,16 @@ const StoreCtx = createContext(null);
 export function StoreProvider({ children }) {
   const [state, dispatch] = useReducer(reducer, undefined, seed);
   const [authReady, setAuthReady] = useState(false);
+
+  // Save every new audit entry in Firebase, once.
+  const savedAudit = useRef(new Set());
+  useEffect(() => {
+    for (const entry of state.audit) {
+      if (!entry.persist || savedAudit.current.has(entry.id)) continue;
+      savedAudit.current.add(entry.id);
+      writeAudit(entry);
+    }
+  }, [state.audit]);
 
 
 

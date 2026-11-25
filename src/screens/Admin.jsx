@@ -14,6 +14,7 @@ import {
 import { Person } from './Shared.jsx';
 import { createClinicAccount } from '../createClinicAccount.js';
 import { useAgencyRequests } from "../useAgencyRequests.js";
+import { watchAuditLog } from "../auditLog.js";
 import {
   LIMITS, nameError, usernameError, passwordError, confirmError, statusReasonError, noteError,
   networkError, normalizeNetwork, agencyKey, friendlyError,
@@ -218,10 +219,12 @@ const create = async () => {
       role: "Clinic Staff"
     });
 
+    dispatch({ type: 'logAction', action: 'Created account', note: `${f.name.trim()} · Clinic Staff` });
     toast(`Account created for ${f.name.trim()}`);
     close();
 
   } catch (error) {
+    if (error.code === 'permission-denied') dispatch({ type: 'logDenied', detail: 'Firebase refused to create a clinic account' });
     console.error("Create account failed:", error);
     const message = friendlyError(error, "Unable to create the account. Please try again.");
     setErrors(/username/i.test(message) ? { username: message } : { form: message });
@@ -270,9 +273,11 @@ const deactivate = async () => {
       statusReason: value.trim().replace(/\s+/g, " ")
     });
 
+    dispatch({ type: 'logAction', action: 'Deactivated account', note: `${dialog.user.name} · Reason: ${value.trim()}` });
     toast(`${dialog.user.name} deactivated`);
     close();
   } catch (error) {
+    if (error.code === 'permission-denied') dispatch({ type: 'logDenied', detail: 'Firebase refused to deactivate a clinic account' });
     console.error("Deactivate failed:", error);
     setErrors({
       value: friendlyError(error, "Unable to deactivate the account. Please try again.")
@@ -287,8 +292,10 @@ const activate = async (u) => {
       statusReason: ""
     });
 
+    dispatch({ type: 'logAction', action: 'Activated account', note: u.name });
     toast(`${u.name} activated`);
   } catch (error) {
+    if (error.code === 'permission-denied') dispatch({ type: 'logDenied', detail: 'Firebase refused to reactivate a clinic account' });
     console.error("Activate failed:", error);
     toast("Unable to activate account.");
   }
@@ -485,6 +492,7 @@ const total = (id) =>
       toast(`${agency.name} ${verb}`);
       return true;
     } catch (err) {
+      if (err.code === 'permission-denied') dispatch({ type: 'logDenied', detail: 'Firebase refused to change an agency status' });
       console.error(`Agency could not be ${verb}:`, err);
       const message = err.code === 'permission-denied'
         ? 'Permission denied. Check that your admin account may update agencies in the Firestore rules.'
@@ -668,6 +676,7 @@ function AgencyPanels({ a }) {
 /** Agency registration review: approve, or reject with a reason. */
 export function AgencyRequest({ id }) {
   const { back, toast } = useNav();
+  const { dispatch } = useStore();
   const { requests, loading, error: loadError } = useAgencyRequests();
 
   const a = requests.find((item) => item.id === id);
@@ -694,9 +703,11 @@ export function AgencyRequest({ id }) {
         statusReason: ""
       });
 
+      dispatch({ type: 'logAction', action: 'Agency approved', note: a.name });
       toast(`${a.name} approved`);
       back();
     } catch (err) {
+      if (err.code === 'permission-denied') dispatch({ type: 'logDenied', detail: 'Firebase refused to approve an agency request' });
       console.error("Agency approval failed:", err);
       setError(friendlyError(err, "Unable to approve the agency. Please try again."));
     } finally {
@@ -720,9 +731,11 @@ export function AgencyRequest({ id }) {
         statusReason: reason.trim().replace(/\s+/g, " ")
       });
 
+      dispatch({ type: 'logAction', action: 'Agency rejected', note: `${a.name} · Reason: ${reason.trim()}` });
       toast(`${a.name} rejected`);
       back();
     } catch (err) {
+      if (err.code === 'permission-denied') dispatch({ type: 'logDenied', detail: 'Firebase refused to reject an agency request' });
       console.error("Agency rejection failed:", err);
       setError(friendlyError(err, "Unable to reject the agency. Please try again."));
     } finally {
@@ -1053,51 +1066,85 @@ const ACTION_TONE = {
   'Break-glass': 'red', 'Flagged break-glass': 'red', 'Deactivated account': 'red',
   'Agency suspended': 'red', 'Agency rejected': 'red',
   'Submitted medical report': 'teal', 'Submitted billing statement': 'teal',
-  'Signed in': 'slate', 'Viewed record': 'slate',
+  'Signed in': 'slate', 'Viewed record': 'slate', 'Viewed timeline': 'slate', 'Viewed endorsement': 'slate',
+  'Downloaded file': 'slate', 'Requested medical update': 'teal',
 };
 
-/** Audit log (read-only). Clinic users only: agency activity is not recorded. */
+/** Who the entries in the audit log come from. */
+const AUDIT_GROUPS = [
+  { value: '', label: 'All users' },
+  { value: 'clinic', label: 'Clinic staff and admin' },
+  { value: 'agency', label: 'Manning agencies' },
+  { value: 'denied', label: 'Failed and denied attempts' },
+];
+
+/** Audit log (read-only), loaded from Firebase. Records clinic users and manning agencies. */
 export function AuditLog() {
-  const { state } = useStore();
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [q, setQ] = useState('');
+  const [group, setGroup] = useState('');
   const [who, setWho] = useState('');
   const [action, setAction] = useState('');
-  const people = [...new Set(state.audit.map((x) => x.who))];
-  const actions = [...new Set(state.audit.map((x) => x.action))];
+
+  useEffect(() => watchAuditLog(
+    (rows) => { setEntries(rows); setLoading(false); setLoadError(''); },
+    (err) => {
+      console.error('Audit log could not be loaded:', err);
+      setLoading(false);
+      setLoadError(err.code === 'permission-denied'
+        ? 'Firebase refused to show the audit log. Check that the auditLogs rules allow the clinic admin to read it.'
+        : 'The audit log could not be loaded. Check your connection and try again.');
+    },
+  ), []);
+
+  const inGroup = (x) => (
+    !group
+    || (group === 'denied' ? x.outcome === 'denied' : x.actorType === group)
+  );
+  const grouped = entries.filter(inGroup);
+  const people = [...new Set(grouped.map((x) => x.who))].sort();
+  const actions = [...new Set(grouped.map((x) => x.action))].sort();
   const needle = q.trim().toLowerCase();
-  const list = state.audit.filter(
+  const list = grouped.filter(
     (x) =>
       (!who || x.who === who) &&
       (!action || x.action === action) &&
-      (!needle || `${x.ref} ${x.note || ''}`.toLowerCase().includes(needle)),
+      (!needle || `${x.who} ${x.ref} ${x.note || ''}`.toLowerCase().includes(needle)),
   );
 
   return (
     <Shell title="Audit log" tab="a.audit">
       <Intro
-        title="Clinic activity"
-        sub="Who did what: every medical report, billing statement and account change by clinic staff and admins. Manning agency activity is not included."
+        title="Activity of all users"
+        sub="Sign-ins, record views, downloads, changes, medical reports, billing statements, update requests and break-glass use by clinic staff, the clinic admin and manning agencies. Entries cannot be changed or deleted."
       />
       <div className="toolbar">
         <Field label="Search" className="grow">
-          <input type="search" value={q} placeholder="Search reference, patient or file name" onChange={(ev) => setQ(ev.target.value)} />
+          <input type="search" value={q} maxLength={100} placeholder="Search user, patient code or details" onChange={(ev) => setQ(ev.target.value)} />
         </Field>
-        <Field label="Clinic user">
-          <Select searchable clearable value={who} onChange={setWho} options={[{ value: '', label: 'All clinic users' }, ...people]} />
+        <Field label="Users">
+          <Select value={group} onChange={(v) => { setGroup(v); setWho(''); setAction(''); }} options={AUDIT_GROUPS} />
+        </Field>
+        <Field label="User">
+          <Select searchable clearable value={who} onChange={setWho} options={[{ value: '', label: 'Everyone' }, ...people]} />
         </Field>
         <Field label="Action">
           <Select searchable clearable value={action} onChange={setAction} options={[{ value: '', label: 'All actions' }, ...actions]} />
         </Field>
       </div>
+      {loadError && <Note tone="red" icon="alert">{loadError}</Note>}
       <Card flush>
         <Table
-          key={`${who}:${action}:${needle}`}
+          key={`${group}:${who}:${action}:${needle}`}
           size={15}
           columns={[
             { head: 'When', cell: (x) => stamp(x.ms), className: 'nowrap' },
-            { head: 'Clinic user', cell: (x) => <><span className="strong">{x.who}</span><span className="meta">{x.role}</span></> },
-            { head: 'Action', cell: (x) => <Chip tone={ACTION_TONE[x.action] || 'amber'}>{x.action}</Chip> },
-            { head: 'Reference', cell: (x) => (x.ref === '—' ? <span className="meta">None</span> : x.ref), className: 'nowrap' },
+            { head: 'User', cell: (x) => <><span className="strong">{x.who}</span><span className="meta">{x.role || 'Not signed in'}</span></> },
+            { head: 'Action', cell: (x) => <Chip tone={x.outcome === 'denied' ? 'red' : ACTION_TONE[x.action] || 'amber'}>{x.action}</Chip> },
+            { head: 'Patient Code', cell: (x) => (x.ref === '—' ? <span className="meta">None</span> : x.ref), className: 'nowrap' },
+            { head: 'Network', cell: (x) => <span className="meta">{x.network || '—'}</span> },
             {
               head: 'Details',
               cell: (x) => (x.note
@@ -1107,7 +1154,7 @@ export function AuditLog() {
           ]}
           rows={list}
           rowKey={(x) => x.id}
-          empty="No audit entries match."
+          empty={loading ? 'Loading the audit log...' : 'No audit entries match.'}
         />
       </Card>
     </Shell>

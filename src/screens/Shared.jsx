@@ -1,5 +1,5 @@
 // Screens used by more than one role: status timeline, alerts, profile.
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { doc, getDoc, updateDoc } from 'firebase/firestore';
 import { db } from '../firebase.js';
 import { useStore, myAlerts, stamp, fmtDate, isClosed, visitsOf, agencyName, hasBreakGlass, ROLE_LABEL } from '../store.jsx';
@@ -26,6 +26,18 @@ export function Timeline({ id }) {
   const { toast } = useNav();
   const { role, agencyId } = state.session;
   const e = state.endorsements.find((x) => x.ref === id);
+
+  // Record the view once the record has loaded. An agency opening another agency's
+  // record is refused and recorded as a denied attempt.
+  const otherAgency = !!e && role === 'agency' && e.agencyId !== agencyId;
+  const logged = useRef(false);
+  useEffect(() => {
+    if (logged.current || !e) return;
+    logged.current = true;
+    dispatch(otherAgency
+      ? { type: 'logDenied', id, detail: 'Tried to open an endorsement of another agency' }
+      : { type: 'logView', id, what: 'Viewed timeline' });
+  }, [e, otherAgency, id, dispatch]);
 
   // Agencies may only open their own patients.
   if (!e || (role === 'agency' && e.agencyId !== agencyId)) {
@@ -69,7 +81,7 @@ export function Timeline({ id }) {
               ]}
             />
             <div style={{ marginTop: 16 }}>
-              <FileRow label="Referral letter" file={e.referral} locked={locked} />
+              <FileRow label="Referral letter" file={e.referral} locked={locked} record={e.ref} />
             </div>
           </Card>
 
@@ -115,13 +127,13 @@ export function Timeline({ id }) {
                 </small>
                 {t.kind === 'visit' && (
                   <div className="files">
-                    <FileRow label="Medical report" file={t.report} locked={locked} />
+                    <FileRow label="Medical report" file={t.report} locked={locked} record={e.ref} />
                     {!t.billing && <small>Billing statement for this visit to follow.</small>}
                   </div>
                 )}
                 {t.kind === 'billing' && (
                   <div className="files">
-                    <FileRow label="Billing statement" file={t.file} locked={locked} />
+                    <FileRow label="Billing statement" file={t.file} locked={locked} record={e.ref} />
                   </div>
                 )}
               </li>
