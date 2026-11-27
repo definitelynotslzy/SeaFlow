@@ -1,5 +1,39 @@
 rules_version = '2';
 
+// =====================================================================
+// SeaFlow Firestore security rules
+// These run on Google's servers for every read and write. The app's screens
+// only reflect them; hiding a button never replaces a rule here.
+//
+// Who can do what (anything not listed is refused):
+//
+//   users            Admin: read all, create Clinic Staff accounts, deactivate or
+//                    reactivate staff, withdraw or restore break-glass.
+//                    Each clinic user: read their own account.
+//   agencyRequests   Anyone signing up: create their own request (Pending).
+//                    Admin: list all, approve, reject, suspend, reactivate.
+//                    Agency: read its own; edit its own contact numbers and emails.
+//                    Clinic staff: read agency profiles.
+//   endorsements     Approved agency: create its own; read its own.
+//                    Clinic staff and admin: read all (limited fields); accept.
+//   patientDetails   Approved agency: create and read its own.
+//                    Admin: read all. Clinic staff: read only on the clinic
+//                    network or with running break-glass access for that record.
+//   clinicVisits,    Clinic staff and admin: create and read.
+//   billingStatements Approved agency: read its own.
+//   breakGlass       Clinic staff: request (if not withdrawn), read and end their own.
+//                    Admin: read all, review, end when withdrawing.
+//   settings         Admin: save the access policy. Clinic users: read it.
+//   networkPasses    Written only by the server check (api/network.js).
+//                    Each clinic user: read their own.
+//   auditLogs        Signed-in users: add entries about themselves. Anyone: add a
+//                    failed or blocked sign-in. Admin: read. Nobody: edit or delete.
+//
+// Deactivated clinic accounts and suspended, rejected or pending agencies fail
+// isClinicUser() / isApprovedAgency(), so they reach no patient data.
+// Nothing can be deleted.
+// =====================================================================
+
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -37,6 +71,23 @@ service cloud.firestore {
         ).data.status == "Active";
     }
 
+    // Field checks shared by several collections.
+    function isName(v) {
+      return v is string && v.size() >= 2 && v.size() <= 100;
+    }
+
+    function isMobile(v) {
+      return v is string && v.matches('^09[0-9]{9}$');
+    }
+
+    function isEmail(v) {
+      return v is string && v.size() <= 254 && v.matches('^[^@ ]+@[^@ ]+[.][^@ ]+$');
+    }
+
+    function isDate(v) {
+      return v is string && v.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
+    }
+
     function isApprovedAgency() {
       return signedIn()
         && exists(
@@ -61,8 +112,16 @@ service cloud.firestore {
       allow list: if isAdmin();
 
       allow create: if isAdmin()
+        && request.resource.data.keys().hasOnly([
+          "name", "username", "role", "status", "duty", "createdAt"
+        ])
+        && isName(request.resource.data.name)
+        && request.resource.data.username is string
+        && request.resource.data.username.matches('^[a-z0-9._-]{3,50}$')
         && request.resource.data.role == "staff"
-        && request.resource.data.status == "Active";
+        && request.resource.data.status == "Active"
+        && (request.resource.data.get("duty", null) == null
+          || request.resource.data.duty in ["Endorsements and updates", "Billing", "Both"]);
 
       // Clinic Admin can deactivate/reactivate staff,
       // or withdraw/restore a staff member's break-glass privilege.
@@ -79,6 +138,7 @@ service cloud.firestore {
                 "statusReason"
               ])
             && request.resource.data.statusReason is string
+            && request.resource.data.statusReason.size() <= 300
           )
           || (
             request.resource.data.diff(resource.data)
@@ -109,8 +169,23 @@ service cloud.firestore {
           "PT-" + endorsementId
         && request.resource.data.status == "Pending"
         && request.resource.data.createdAt == request.time
-        // Private details go in patientDetails, never in this record.
-        && !request.resource.data.keys().hasAny(privateFields());
+        // Only these fields; private details go in patientDetails, never in this record.
+        && request.resource.data.keys().hasOnly([
+          "ref", "patientCode", "agencyId", "name", "case", "visitDate", "status",
+          "receivedMs", "timeline", "turnaroundMin", "cashBasis", "updateRequested", "createdAt"
+        ])
+        && isName(request.resource.data.name)
+        && request.resource.data.case is string
+        && request.resource.data.case.size() >= 5
+        && request.resource.data.case.size() <= 200
+        && isDate(request.resource.data.visitDate)
+        && request.resource.data.receivedMs is int
+        && request.resource.data.timeline is list
+        && request.resource.data.timeline.size() == 1
+        && request.resource.data.timeline[0].label == "Received"
+        && request.resource.data.turnaroundMin == null
+        && request.resource.data.cashBasis == false
+        && request.resource.data.updateRequested == false;
 
       // Clinic users can view all endorsements (limited fields only).
       // Agencies can view their own endorsements.
@@ -190,6 +265,15 @@ service cloud.firestore {
       allow create: if isApprovedAgency()
         && request.resource.data.agencyId == request.auth.uid
         && request.resource.data.keys().hasOnly(privateFields().concat(["agencyId"]))
+        && isMobile(request.resource.data.contact)
+        && isEmail(request.resource.data.email)
+        && isDate(request.resource.data.birthday)
+        && request.resource.data.address is string
+        && request.resource.data.address.size() <= 200
+        && request.resource.data.position is string
+        && request.resource.data.position.size() <= 50
+        && request.resource.data.vessel is string
+        && request.resource.data.vessel.size() <= 60
         && getAfter(
           /databases/$(database)/documents/endorsements/$(endorsementId)
         ).data.agencyId == request.auth.uid;
@@ -296,6 +380,16 @@ service cloud.firestore {
     // MANNING AGENCY REQUESTS
     // ==============================
 
+    // The authorized representative, and the person in charge of medical report and billing.
+    function contactPersonIsValid(p) {
+      return p.keys().hasOnly(["name", "position", "contact", "email"])
+        && p.keys().hasAll(["name", "position", "contact", "email"])
+        && isName(p.name)
+        && p.position is string && p.position.size() >= 2 && p.position.size() <= 100
+        && isMobile(p.contact)
+        && isEmail(p.email);
+    }
+
     match /agencyRequests/{requestId} {
 
       // Admin/staff can view agency profiles.
@@ -312,6 +406,8 @@ service cloud.firestore {
       // Agency registration.
       allow create: if signedIn()
         && request.auth.uid == requestId
+        // A clinic account cannot also register as an agency.
+        && !exists(/databases/$(database)/documents/users/$(request.auth.uid))
         && request.resource.data.keys().hasOnly([
           "agencyName",
           "address",
@@ -342,6 +438,8 @@ service cloud.firestore {
         )
         && request.resource.data.authorized is map
         && request.resource.data.billing is map
+        && contactPersonIsValid(request.resource.data.authorized)
+        && contactPersonIsValid(request.resource.data.billing)
         && request.resource.data.status == "Pending"
         && request.resource.data.createdAt == request.time;
 
@@ -393,10 +491,10 @@ service cloud.firestore {
               "contact",
               "email"
             ])
-          && request.resource.data.authorized.contact is string
-          && request.resource.data.authorized.email is string
-          && request.resource.data.billing.contact is string
-          && request.resource.data.billing.email is string
+          && isMobile(request.resource.data.authorized.contact)
+          && isEmail(request.resource.data.authorized.email)
+          && isMobile(request.resource.data.billing.contact)
+          && isEmail(request.resource.data.billing.email)
         );
 
       allow delete: if false;
@@ -526,15 +624,16 @@ match /clinicVisits/{visitId} {
         && d.record is string && d.record.size() <= 50
         && d.details is string && d.details.size() <= 1000
         && d.network is string && d.network.size() <= 60
-        && d.outcome in ["allowed", "denied"];
+        && d.outcome in ["allowed", "denied"]
+        && d.role in ["Clinic Staff", "Clinic Admin", "Manning Agency", ""];
     }
 
     function auditIsOwnEntry() {
       let d = request.resource.data;
       return signedIn()
         && d.actorId == request.auth.uid
-        && ((d.actorType == "clinic" && isClinicUser())
-          || (d.actorType == "agency" && isApprovedAgency()));
+        && ((d.actorType == "clinic" && isClinicUser() && d.role != "Manning Agency")
+          || (d.actorType == "agency" && isApprovedAgency() && d.role == "Manning Agency"));
     }
 
     function auditIsSignInFailure() {
@@ -551,6 +650,12 @@ match /clinicVisits/{visitId} {
       allow create: if auditEntryIsValid()
         && (auditIsOwnEntry() || auditIsSignInFailure());
       allow update, delete: if false;
+    }
+
+    // Everything else is refused. (Firestore already refuses anything without a rule;
+    // this line makes that visible.)
+    match /{everythingElse=**} {
+      allow read, write: if false;
     }
   }
 }
