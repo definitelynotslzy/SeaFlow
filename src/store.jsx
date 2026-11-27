@@ -15,7 +15,10 @@ import { auth, db } from "./firebase.js";
 import { writeAudit } from "./auditLog.js";
 import { checkClinicNetwork } from "./clinicNetwork.js";
 import { PRIVATE_FIELDS, withoutDetails } from "./patientDetails.js";
-import { DEFAULT_POLICY, loadAccessPolicy, loadMyBreakGlass } from "./accessSettings.js";
+import {
+  DEFAULT_POLICY, END_REASON, loadAccessPolicy, endMyBreakGlass,
+  watchMyBreakGlass, watchAllBreakGlass, watchMyBreakGlassPrivilege,
+} from "./accessSettings.js";
 
 /* ---------- constants ---------- */
 
@@ -105,9 +108,7 @@ export function myAlerts(state) {
 
 /** True when the signed-in staff member has an unexpired break-glass grant. */
 export function hasBreakGlass(state, id) {
-  return state.breakGlass.some(
-    (b) => b.ref === id && b.by === state.session?.name && b.expires > Date.now(),
-  );
+  return myGrants(state).some((b) => b.ref === id);
 }
 
 /* ---------- seed data (all fictional) ---------- */
@@ -268,7 +269,11 @@ const endorsements = [];
       { id: 2, to: 'staff', text: 'New endorsement from Harbor Crew Manning Agency.', ms: NOW - 4 * HOUR },
       { id: 1, to: 'admin', text: 'New agency access request from Island Spirit Crewing Corp.', ms: NOW - 12 * HOUR },
     ],
+    // Break-glass grants from Firebase: staff see their own, the admin sees everyone's.
     breakGlass: [],
+    breakGlassAllowed: true, // false when the clinic admin has withdrawn this staff member's privilege
+    bgPing: null, // admin: the newest break-glass request, shown as a message on screen
+    freshSignIn: false,
     // Sample entries for the demo; real entries are saved in Firebase and shown from there.
     audit: [
       { id: 2, who: 'R. Santos', role: 'Clinic Staff', action: 'Accepted endorsement', ref: juan.ref, ms: juan.timeline[1].ms, note: 'Patient: Juan Dela Cruz · Pacific Crew Manning Agency' },
@@ -299,7 +304,9 @@ export function hasDetails(state, id) {
 
 /** My break-glass grants that are still running. */
 export function myGrants(state) {
-  return state.breakGlass.filter((b) => b.by === state.session?.name && b.expires > Date.now());
+  const s = state.session;
+  if (!s || s.role !== 'staff' || !state.breakGlassAllowed) return [];
+  return state.breakGlass.filter((b) => (b.uid ? b.uid === s.userId : b.by === s.name) && b.expires > Date.now());
 }
 
 /* ---------- reducer ---------- */
@@ -386,6 +393,10 @@ case 'login':
     insideNetwork: false,
     network: { ...NETWORK_START, status: a.session.role === 'agency' ? 'idle' : 'checking' },
     patientDetails: {},
+    breakGlass: [],
+    breakGlassAllowed: true,
+    bgPing: null,
+    freshSignIn: !!a.fresh,
     endorsements: s.endorsements.filter(
       (e) => e.source !== "firebase"
     ),
@@ -401,6 +412,10 @@ case 'logout':
     network: NETWORK_START,
     patientDetails: {},
     policy: DEFAULT_POLICY,
+    breakGlass: [],
+    breakGlassAllowed: true,
+    bgPing: null,
+    freshSignIn: false,
     endorsements: s.endorsements.filter(
       (e) => e.source !== "firebase"
     ),
@@ -442,20 +457,41 @@ case 'logout':
       return { ...s, patientDetails: details, endorsements: mergeDetails(s.endorsements, details) };
     }
 
-    // Break-glass grants saved in Firebase that are still running (after a page refresh).
-    case 'restoreBreakGlass': {
-      if (!me) return s;
-      const fresh = a.grants.filter((g) => !s.breakGlass.some((b) => b.ref === g.ref && b.by === me.name && b.expires >= g.expires));
-      if (!fresh.length) return s;
-      const minutes = s.policy.breakGlassMinutes;
+    // Break-glass grants as saved in Firebase (live). For the admin this also makes the alerts,
+    // and flags a request that arrived just now so it can be shown on screen at once.
+    case 'syncBreakGlass': {
+      const known = new Set(s.breakGlass.map((b) => b.id));
+      let alerts = s.alerts.filter((x) => !String(x.id).startsWith('bg-'));
+      let ping = s.bgPing;
+      if (me?.role === 'admin') {
+        const bgAlerts = a.grants.map((g) => ({
+          id: `bg-${g.id}-${g.ms}`,
+          to: 'admin',
+          text: `Break-glass access by ${g.by} on ${g.ref}. Reason: ${g.reason}.`,
+          ms: g.ms,
+        }));
+        alerts = [...bgAlerts, ...alerts].sort((x, y) => y.ms - x.ms);
+        const arrived = a.initial ? [] : a.grants.filter((g) => g.status === 'New' && g.expires > Date.now()
+          && (!known.has(g.id) || s.breakGlass.find((b) => b.id === g.id).ms !== g.ms));
+        if (arrived.length) {
+          const g = arrived[0];
+          ping = { key: `${g.id}-${g.ms}`, text: `${g.by} opened ${g.ref} (${g.reason}).` };
+        }
+      }
+      return { ...s, breakGlass: a.grants, alerts, bgPing: ping };
+    }
+
+    // Staff: the admin withdrew or restored my break-glass privilege.
+    case 'setBreakGlassAllowed':
       return {
         ...s,
-        breakGlass: [
-          ...fresh.map((g, i) => ({ id: `fb-${g.ref}-${i}`, ref: g.ref, by: me.name, reason: g.reason, note: g.note, ms: g.expires - minutes * 60e3, minutes, expires: g.expires, status: 'New' })),
-          ...s.breakGlass,
-        ],
+        breakGlassAllowed: a.allowed,
+        // Withdrawn: anything still open closes now on this device, too.
+        breakGlass: a.allowed ? s.breakGlass : s.breakGlass.map((b) => (b.expires > now ? { ...b, expires: now, endReason: END_REASON.withdrawn } : b)),
       };
-    }
+
+    case 'signInHandled':
+      return { ...s, freshSignIn: false };
 
     case 'setPolicy':
       return { ...s, policy: { ...DEFAULT_POLICY, ...a.policy } };
@@ -603,10 +639,11 @@ case 'logout':
       return {
         ...s,
         breakGlass: [
-          { id: s.breakGlass.length + 1, ref: a.id, by: me.name, reason: a.reason, note: a.note, ms: now, minutes, expires: now + minutes * 60e3, status: 'New' },
-          ...s.breakGlass,
+          // Same id as the Firebase record, so the live copy replaces this one.
+          { id: `${me.userId}_${a.id}`, uid: me.userId, ref: a.id, by: me.name, reason: a.reason, note: a.note, ms: now, minutes, expires: now + minutes * 60e3, status: 'New' },
+          ...s.breakGlass.filter((b) => b.id !== `${me.userId}_${a.id}`),
         ],
-        alerts: alert(s.alerts, 'admin', `Break-glass request by ${me.name} on ${a.id}.`),
+        // The admin's alert comes from Firebase (see 'syncBreakGlass').
         audit: audit('Break-glass', a.id, `Patient: ${find(a.id)?.name} · Reason: ${a.reason} · ${a.note}`),
       };
     }
@@ -726,12 +763,35 @@ export function StoreProvider({ children }) {
     loadAccessPolicy()
       .then((policy) => policy && dispatch({ type: 'setPolicy', policy }))
       .catch((error) => console.error('Unable to load the access policy:', error));
-    if (role === 'staff') {
-      loadMyBreakGlass()
-        .then((grants) => grants.length && dispatch({ type: 'restoreBreakGlass', grants }))
-        .catch((error) => console.error('Unable to load break-glass access:', error));
-    }
   }, [authReady, clinic, role, userId]);
+
+  // Break-glass, live from Firebase.
+  //   staff: my own grants and whether the admin still allows me break-glass;
+  //   admin: every grant, so a new request shows up the moment it is made.
+  useEffect(() => {
+    if (!authReady || !clinic) return undefined;
+    const failed = (error) => console.error('Break-glass records not available:', error.code || error);
+    if (role === 'admin') {
+      let first = true;
+      return watchAllBreakGlass((grants) => {
+        dispatch({ type: 'syncBreakGlass', grants, initial: first });
+        first = false;
+      }, failed);
+    }
+    const stopGrants = watchMyBreakGlass((grants) => dispatch({ type: 'syncBreakGlass', grants }), failed);
+    const stopPrivilege = watchMyBreakGlassPrivilege((allowed) => dispatch({ type: 'setBreakGlassAllowed', allowed }), failed);
+    return () => { stopGrants(); stopPrivilege(); };
+  }, [authReady, clinic, role, userId]);
+
+  // A new sign-in ends any break-glass access left open by an earlier session
+  // (for example, a browser that was closed without signing out).
+  useEffect(() => {
+    if (!authReady || role !== 'staff' || !state.freshSignIn) return;
+    dispatch({ type: 'signInHandled' });
+    endMyBreakGlass(END_REASON.newSession)
+      .then((ended) => ended.forEach((ref) => dispatch({ type: 'logAction', action: 'Ended break-glass', id: ref, note: END_REASON.newSession })))
+      .catch((error) => console.error('Unable to end earlier break-glass access:', error));
+  }, [authReady, role, state.freshSignIn]);
 
   // Break-glass grants that are still running, as "id:expiry" so the effect below restarts when they change.
   const grants = role === 'staff' ? myGrants(state) : [];

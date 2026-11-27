@@ -7,6 +7,7 @@ import * as S from './screens/Staff.jsx';
 import * as A from './screens/Admin.jsx';
 import * as Shared from './screens/Shared.jsx';
 import { logoutUser } from "./logout.js";
+import { END_REASON } from "./accessSettings.js";
 
 // Screen registry. Codes in comments match the prototype screen document.
 const SCREENS = {
@@ -86,6 +87,9 @@ function Inner() {
 
   // Auto-logout after inactivity (duration comes from the admin access policy).
   const idleMinutes = state.policy.autoLogoutMinutes;
+  // The timer below needs the latest state when it fires, not the state from when it was set.
+  const latest = useRef(state);
+  latest.current = state;
   useEffect(() => {
     if (!role) return undefined;
     let timer;
@@ -93,7 +97,7 @@ function Inner() {
       clearTimeout(timer);
       
 timer = setTimeout(async () => {
-  const success = await logoutUser(dispatch, role);
+  const success = await logoutUser(dispatch, latest.current, END_REASON.timedOut);
 
   if (success) {
     showToast("Signed out after inactivity");
@@ -112,6 +116,21 @@ timer = setTimeout(async () => {
       window.removeEventListener('keydown', arm);
     };
   }, [role, idleMinutes, dispatch, showToast]);
+
+  // Clinic admin: a new break-glass request shows at once as a message on screen,
+  // and as a desktop notification when SeaFlow is in a background tab (if allowed).
+  const ping = state.bgPing;
+  useEffect(() => {
+    if (!ping || role !== 'admin') return;
+    showToast(`Break-glass alert: ${ping.text}`);
+    try {
+      if (document.visibilityState !== 'visible' && 'Notification' in window && Notification.permission === 'granted') {
+        new Notification('SeaFlow: break-glass access', { body: ping.text, tag: ping.key });
+      }
+    } catch (error) {
+      console.error('Desktop notification failed:', error);
+    }
+  }, [ping?.key]);
 
   // Guard: never show a signed-in screen without a session, or the reverse.
   let top = stack[stack.length - 1];

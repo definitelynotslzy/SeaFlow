@@ -64,18 +64,33 @@ service cloud.firestore {
         && request.resource.data.role == "staff"
         && request.resource.data.status == "Active";
 
-      // Clinic Admin can deactivate/reactivate staff.
+      // Clinic Admin can deactivate/reactivate staff,
+      // or withdraw/restore a staff member's break-glass privilege.
       allow update: if isAdmin()
         && resource.data.role == "staff"
         && request.resource.data.role == "staff"
-        && resource.data.status in ["Active", "Deactivated"]
-        && request.resource.data.status in ["Active", "Deactivated"]
-        && request.resource.data.diff(resource.data)
-          .affectedKeys().hasOnly([
-            "status",
-            "statusReason"
-          ])
-        && request.resource.data.statusReason is string;
+        && (
+          (
+            resource.data.status in ["Active", "Deactivated"]
+            && request.resource.data.status in ["Active", "Deactivated"]
+            && request.resource.data.diff(resource.data)
+              .affectedKeys().hasOnly([
+                "status",
+                "statusReason"
+              ])
+            && request.resource.data.statusReason is string
+          )
+          || (
+            request.resource.data.diff(resource.data)
+              .affectedKeys().hasOnly([
+                "breakGlassAllowed",
+                "breakGlassNote"
+              ])
+            && request.resource.data.breakGlassAllowed is bool
+            && request.resource.data.breakGlassNote is string
+            && request.resource.data.breakGlassNote.size() <= 500
+          )
+        );
 
       allow delete: if false;
     }
@@ -151,8 +166,15 @@ service cloud.firestore {
           .data.expiresAt > request.time;
     }
 
+    // False once the clinic admin has withdrawn this user's break-glass privilege.
+    function breakGlassAllowed() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid))
+        .data.get("breakGlassAllowed", true) == true;
+    }
+
     function hasBreakGlassFor(endorsementId) {
-      return exists(/databases/$(database)/documents/breakGlass/$(request.auth.uid + "_" + endorsementId))
+      return breakGlassAllowed()
+        && exists(/databases/$(database)/documents/breakGlass/$(request.auth.uid + "_" + endorsementId))
         && get(/databases/$(database)/documents/breakGlass/$(request.auth.uid + "_" + endorsementId))
           .data.expiresAt > request.time;
     }
@@ -209,10 +231,14 @@ service cloud.firestore {
     }
 
     // Break-glass: one record per staff member and endorsement, reused once it has ended.
+    // It ends at expiresAt. Ending early (sign-out, time-out, a new sign-in, or the admin
+    // withdrawing the privilege) sets expiresAt to that moment.
     function breakGlassIsValid(grantId) {
       let d = request.resource.data;
       return isClinicUser()
-        && d.keys().hasOnly(["endorsementId", "uid", "name", "reason", "note", "createdAt", "expiresAt"])
+        && breakGlassAllowed()
+        && d.keys().hasOnly(["endorsementId", "uid", "name", "reason", "note",
+          "minutes", "status", "createdAt", "expiresAt"])
         && d.uid == request.auth.uid
         && grantId == request.auth.uid + "_" + d.endorsementId
         && d.endorsementId is string
@@ -220,6 +246,8 @@ service cloud.firestore {
         && d.name is string && d.name.size() <= 200
         && d.reason is string && d.reason.size() > 0 && d.reason.size() <= 60
         && d.note is string && d.note.size() > 0 && d.note.size() <= 1000
+        && d.minutes == breakGlassMinutes()
+        && d.status == "New"
         && d.createdAt == request.time
         && d.expiresAt is timestamp
         && d.expiresAt > request.time
@@ -227,11 +255,40 @@ service cloud.firestore {
         && d.expiresAt <= request.time + duration.value(breakGlassMinutes() * 60 + 120, "s");
     }
 
+    // Ends a grant that is still open, now, for one of the given reasons.
+    function breakGlassEndsNow(reasons) {
+      let d = request.resource.data;
+      return d.diff(resource.data).affectedKeys().hasOnly(["expiresAt", "endedAt", "endReason"])
+        && resource.data.expiresAt > request.time
+        && d.expiresAt == request.time
+        && d.endedAt == request.time
+        && d.endReason in reasons;
+    }
+
+    function breakGlassReview() {
+      let d = request.resource.data;
+      return d.diff(resource.data).affectedKeys()
+          .hasOnly(["status", "reviewNote", "reviewedBy", "reviewedAt"])
+        && d.status in ["Reviewed", "Flagged"]
+        && d.reviewNote is string && d.reviewNote.size() <= 1000
+        && d.reviewedBy == request.auth.uid
+        && d.reviewedAt == request.time;
+    }
+
     match /breakGlass/{grantId} {
-      // Staff read their own grants (to pick them up again after a page refresh).
+      // Staff read their own grants; the admin reads all of them (live alerts).
       allow get, list: if isAdmin() || (signedIn() && resource.data.uid == request.auth.uid);
       allow create: if breakGlassIsValid(grantId);
-      allow update: if breakGlassIsValid(grantId) && resource.data.expiresAt <= request.time;
+      allow update: if
+        // A new request for the same record after the last one ended.
+        (breakGlassIsValid(grantId) && resource.data.expiresAt <= request.time)
+        // Staff end their own open access when they sign out, time out or sign in again.
+        || (signedIn() && resource.data.uid == request.auth.uid
+          && breakGlassEndsNow(["Signed out", "Timed out", "Session ended"]))
+        // The admin ends open access when withdrawing the privilege.
+        || (isAdmin() && breakGlassEndsNow(["Privilege withdrawn"]))
+        // The admin's review.
+        || (isAdmin() && breakGlassReview());
       allow delete: if false;
     }
 
