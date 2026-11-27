@@ -13,6 +13,9 @@ import {
 } from "firebase/firestore";
 import { auth, db } from "./firebase.js";
 import { writeAudit } from "./auditLog.js";
+import { checkClinicNetwork } from "./clinicNetwork.js";
+import { PRIVATE_FIELDS, withoutDetails } from "./patientDetails.js";
+import { DEFAULT_POLICY, loadAccessPolicy, loadMyBreakGlass } from "./accessSettings.js";
 
 /* ---------- constants ---------- */
 
@@ -250,8 +253,12 @@ const endorsements = [];
   const juan = named[0];
   return {
     session: null,
-    insideNetwork: false, // demo toggle: outside vs inside the clinic network
-    policy: { network: '203.0.113.24', breakGlassMinutes: 30, autoLogoutMinutes: 5 },
+    // Set only by the server check in api/network.js. Outside until that check says otherwise.
+    insideNetwork: false,
+    network: NETWORK_START,
+    // Private patient details the Firestore rules released to this user, by endorsement id.
+    patientDetails: {},
+    policy: DEFAULT_POLICY,
     agencies,
     users,
     endorsements,
@@ -268,6 +275,31 @@ const endorsements = [];
       { id: 1, who: 'R. Santos', role: 'Clinic Staff', action: 'Viewed record', ref: juan.ref, ms: juan.timeline[1].ms - 60e3, note: 'Patient: Juan Dela Cruz' },
     ],
   };
+}
+
+/* ---------- clinic network and patient details ---------- */
+
+// status: idle (not a clinic user), checking, inside, outside, error (the check could not run).
+const NETWORK_START = { status: 'idle', ip: '', configured: true, checkedAt: null, nonce: 0 };
+
+/** Records with only the private details this user was allowed to receive. */
+function mergeDetails(list, details) {
+  return list.map((e) => {
+    if (e.source !== 'firebase') return e;
+    const allowed = details[e.ref];
+    if (!allowed) return withoutDetails(e);
+    return { ...withoutDetails(e), ...Object.fromEntries(PRIVATE_FIELDS.filter((k) => k in allowed).map((k) => [k, allowed[k]])) };
+  });
+}
+
+/** True when this user has received the private details of the record. */
+export function hasDetails(state, id) {
+  return !!state.patientDetails[id];
+}
+
+/** My break-glass grants that are still running. */
+export function myGrants(state) {
+  return state.breakGlass.filter((b) => b.by === state.session?.name && b.expires > Date.now());
 }
 
 /* ---------- reducer ---------- */
@@ -338,10 +370,10 @@ case "setFirebaseEndorsements": {
       ...s.endorsements.filter(
         (e) => e.source !== "firebase"
       ),
-      ...a.endorsements.map((e) => ({
-        ...e,
-        source: "firebase",
-      })),
+      ...mergeDetails(
+        a.endorsements.map((e) => ({ ...e, source: "firebase" })),
+        s.patientDetails
+      ),
     ].sort((a, b) => b.receivedMs - a.receivedMs),
   };
 }
@@ -351,6 +383,9 @@ case 'login':
   return {
     ...s,
     session: a.session,
+    insideNetwork: false,
+    network: { ...NETWORK_START, status: a.session.role === 'agency' ? 'idle' : 'checking' },
+    patientDetails: {},
     endorsements: s.endorsements.filter(
       (e) => e.source !== "firebase"
     ),
@@ -363,13 +398,71 @@ case 'logout':
     session: null,
     firebaseAgencies: {},
     insideNetwork: false,
+    network: NETWORK_START,
+    patientDetails: {},
+    policy: DEFAULT_POLICY,
     endorsements: s.endorsements.filter(
       (e) => e.source !== "firebase"
     ),
   };
 
-    case 'toggleNetwork':
-      return { ...s, insideNetwork: !s.insideNetwork };
+    /* ----- clinic network (answered by the server, see api/network.js) ----- */
+    case 'networkChecked': {
+      if (!s.session || s.session.role === 'agency') return s;
+      const inside = !a.error && !!a.inside;
+      return {
+        ...s,
+        insideNetwork: inside,
+        network: {
+          ...s.network,
+          status: a.error ? 'error' : inside ? 'inside' : 'outside',
+          ip: a.ip || '',
+          configured: a.configured !== false,
+          checkedAt: Date.now(),
+        },
+      };
+    }
+
+    // "Check again" on the banner.
+    case 'recheckNetwork':
+      return { ...s, network: { ...s.network, nonce: s.network.nonce + 1 } };
+
+    // Replaces the private details this user may hold. Anything not in `details` is removed
+    // from memory too, e.g. when a staff member leaves the clinic network.
+    case 'setPatientDetails':
+      return {
+        ...s,
+        patientDetails: a.details,
+        endorsements: mergeDetails(s.endorsements, a.details),
+      };
+
+    // Keeps only the records still allowed (used the moment access narrows).
+    case 'limitPatientDetails': {
+      const details = Object.fromEntries(Object.entries(s.patientDetails).filter(([id]) => a.ids.includes(id)));
+      return { ...s, patientDetails: details, endorsements: mergeDetails(s.endorsements, details) };
+    }
+
+    // Break-glass grants saved in Firebase that are still running (after a page refresh).
+    case 'restoreBreakGlass': {
+      if (!me) return s;
+      const fresh = a.grants.filter((g) => !s.breakGlass.some((b) => b.ref === g.ref && b.by === me.name && b.expires >= g.expires));
+      if (!fresh.length) return s;
+      const minutes = s.policy.breakGlassMinutes;
+      return {
+        ...s,
+        breakGlass: [
+          ...fresh.map((g, i) => ({ id: `fb-${g.ref}-${i}`, ref: g.ref, by: me.name, reason: g.reason, note: g.note, ms: g.expires - minutes * 60e3, minutes, expires: g.expires, status: 'New' })),
+          ...s.breakGlass,
+        ],
+      };
+    }
+
+    case 'setPolicy':
+      return { ...s, policy: { ...DEFAULT_POLICY, ...a.policy } };
+
+    // Re-renders when a break-glass grant runs out.
+    case 'tick':
+      return { ...s };
 
     /* ----- manning agency ----- */
     case 'registerAgency': {
@@ -591,6 +684,103 @@ export function StoreProvider({ children }) {
       writeAudit(entry);
     }
   }, [state.audit]);
+
+  const role = state.session?.role;
+  const userId = state.session?.userId;
+  const agencyId = state.session?.agencyId;
+  const clinic = role === 'staff' || role === 'admin';
+
+  // Clinic network: asked of the server when a clinic user signs in, every 2 minutes after,
+  // when the device reconnects, when the tab comes back into view, and on "Check again".
+  useEffect(() => {
+    if (!authReady || !clinic) return undefined;
+    let stopped = false;
+    const uid = auth.currentUser?.uid;
+    const run = async () => {
+      try {
+        const result = await checkClinicNetwork();
+        if (!stopped && auth.currentUser?.uid === uid) dispatch({ type: 'networkChecked', ...result });
+      } catch (error) {
+        console.error('Clinic network check failed:', error);
+        if (!stopped && auth.currentUser?.uid === uid) dispatch({ type: 'networkChecked', inside: false, error: true });
+      }
+    };
+    const whenVisible = () => document.visibilityState === 'visible' && run();
+    run();
+    const timer = setInterval(run, 2 * 60e3);
+    window.addEventListener('online', run);
+    window.addEventListener('offline', run);
+    document.addEventListener('visibilitychange', whenVisible);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+      window.removeEventListener('online', run);
+      window.removeEventListener('offline', run);
+      document.removeEventListener('visibilitychange', whenVisible);
+    };
+  }, [authReady, clinic, userId, state.network.nonce]);
+
+  // The access policy saved by the admin (clinic network, break-glass length, idle sign-out).
+  useEffect(() => {
+    if (!authReady || !clinic) return;
+    loadAccessPolicy()
+      .then((policy) => policy && dispatch({ type: 'setPolicy', policy }))
+      .catch((error) => console.error('Unable to load the access policy:', error));
+    if (role === 'staff') {
+      loadMyBreakGlass()
+        .then((grants) => grants.length && dispatch({ type: 'restoreBreakGlass', grants }))
+        .catch((error) => console.error('Unable to load break-glass access:', error));
+    }
+  }, [authReady, clinic, role, userId]);
+
+  // Break-glass grants that are still running, as "id:expiry" so the effect below restarts when they change.
+  const grants = role === 'staff' ? myGrants(state) : [];
+  const grantKey = grants.map((b) => `${b.ref}:${b.expires}`).sort().join(',');
+
+  // Re-render the moment a grant runs out, so its details are dropped on time.
+  useEffect(() => {
+    if (!grants.length) return undefined;
+    const next = Math.min(...grants.map((b) => b.expires)) - Date.now();
+    const timer = setTimeout(() => dispatch({ type: 'tick' }), Math.max(0, next) + 50);
+    return () => clearTimeout(timer);
+  }, [grantKey]);
+
+  // Private patient details. The Firestore rules decide what arrives:
+  //   agency: its own patients; admin: all;
+  //   staff on the clinic network: all; staff outside: only records with running break-glass access.
+  useEffect(() => {
+    if (!authReady || !role) return undefined;
+    if (role === 'agency' && !agencyId) return undefined;
+
+    const staffOutside = role === 'staff' && !state.insideNetwork;
+    const grantIds = grantKey ? grantKey.split(',').map((g) => g.split(':')[0]) : [];
+    // Access narrowed: drop what is no longer allowed straight away, before anything else loads.
+    if (staffOutside) dispatch({ type: 'limitPatientDetails', ids: grantIds });
+
+    const toMap = (snapshot) => Object.fromEntries(snapshot.docs.map((d) => [d.id, d.data()]));
+    const failed = (error) => console.error('Patient details not available:', error.code || error);
+    const unsubs = [];
+
+    if (!staffOutside) {
+      const source = role === 'agency'
+        ? query(collection(db, 'patientDetails'), where('agencyId', '==', agencyId))
+        : collection(db, 'patientDetails');
+      unsubs.push(onSnapshot(source, (snapshot) => dispatch({ type: 'setPatientDetails', details: toMap(snapshot) }), (error) => {
+        failed(error);
+        dispatch({ type: 'setPatientDetails', details: {} });
+      }));
+    } else {
+      const found = {};
+      for (const id of grantIds) {
+        unsubs.push(onSnapshot(doc(db, 'patientDetails', id), (snap) => {
+          if (snap.exists()) found[id] = snap.data();
+          else delete found[id];
+          dispatch({ type: 'setPatientDetails', details: { ...found } });
+        }, failed));
+      }
+    }
+    return () => unsubs.forEach((u) => u());
+  }, [authReady, role, agencyId, userId, state.insideNetwork, grantKey]);
 
 
 

@@ -17,7 +17,8 @@ import {
   billingDue,
   daysLeft,
   visitsOf,
-  hasBreakGlass
+  hasBreakGlass,
+  hasDetails
 } from '../store.jsx';
 
 import {
@@ -26,18 +27,32 @@ import {
 import { LIMITS, FILE_RULES, fileError, acceptOf, noteError } from '../validators.js';
 import { Person } from './Shared.jsx';
 import { acceptFirebaseEndorsement } from "../acceptEndorsement.js";
+import { saveBreakGlass } from "../accessSettings.js";
 
-/** Network banner with the prototype's "Demo: switch" control. */
-function NetBanner() {
+const NETWORK_TEXT = {
+  idle: 'Checking the clinic network…',
+  checking: 'Checking the clinic network…',
+  inside: 'On the clinic network: full access to patient details.',
+  outside: 'Outside the clinic network: limited view of patient details. Mobile data, home Wi‑Fi, VPNs and proxies count as outside.',
+  error: 'The clinic network could not be checked, so the limited view is shown.',
+};
+
+/** Network status, as decided by the server from this device's public IP address. */
+export function NetBanner() {
   const { state, dispatch } = useStore();
-  const inside = state.insideNetwork;
+  const { status, configured } = state.network;
+  const inside = status === 'inside';
+  const checking = status === 'checking' || status === 'idle';
   return (
-    <div className={`note banner ${inside ? 'teal' : 'amber'}`}>
+    <div className={`note banner ${inside ? 'teal' : 'amber'}`} role="status">
       <Icon name={inside ? 'wifi' : 'lock'} size={16} />
       <div>
-        {inside ? 'On clinic Wi‑Fi: full access to patient details.' : 'Outside clinic network: limited view of patient details.'}
+        {NETWORK_TEXT[status] || NETWORK_TEXT.outside}
+        {status === 'outside' && !configured && ' The clinic admin has not set the clinic network yet.'}
       </div>
-      <button className="btn sm" onClick={() => dispatch({ type: 'toggleNetwork' })}>Demo: switch</button>
+      <button className="btn sm" disabled={checking} onClick={() => dispatch({ type: 'recheckNetwork' })}>
+        {checking ? 'Checking…' : 'Check again'}
+      </button>
     </div>
   );
 }
@@ -55,7 +70,7 @@ function useListFilter(list, extra) {
       (!agency || e.agencyId === agency) &&
       (!day || dayOf(e.receivedMs) === day) &&
       (!needle ||
-        `${e.name} ${e.ref} ${e.vessel} ${e.position} ${agencyName(state, e.agencyId)}`.toLowerCase().includes(needle)),
+        `${e.name} ${e.ref} ${e.vessel || ''} ${e.position || ''} ${agencyName(state, e.agencyId)}`.toLowerCase().includes(needle)),
   );
   const ui = (
     <div className="toolbar">
@@ -93,7 +108,7 @@ function useListFilter(list, extra) {
 function useOpenPatient() {
   const { state, dispatch } = useStore();
   const { nav } = useNav();
-  const full = (id) => state.insideNetwork || hasBreakGlass(state, id);
+  const full = (id) => hasDetails(state, id);
   return {
     open: (id) => {
       dispatch({ type: 'logView', id });
@@ -245,7 +260,7 @@ const accept = async (e, cash) => {
                 ['Case', e.case],
               ]}
             />
-            <FileRow label="Referral letter" file={e.referral} locked={!state.insideNetwork && !hasBreakGlass(state, e.ref)} record={e.ref} />
+            <FileRow label="Referral letter" file={e.referral} locked={!hasDetails(state, e.ref)} record={e.ref} />
             <div className="rec-f">
               <button
   className="btn primary sm"
@@ -498,7 +513,7 @@ export function Billing() {
   const items = billingItems(state).filter(
     ({ e, v }) =>
       !needle ||
-      `${e.name} ${e.ref} ${e.vessel} ${agencyName(state, e.agencyId)} ${v.billing || ''}`.toLowerCase().includes(needle),
+      `${e.name} ${e.ref} ${e.vessel || ''} ${agencyName(state, e.agencyId)} ${v.billing || ''}`.toLowerCase().includes(needle),
   );
   const toSend = items.filter((i) => !i.v.billing).sort((a, b) => a.v.ms - b.v.ms); // oldest visit first
   const sent = items.filter((i) => i.v.billing).sort((a, b) => b.v.billingMs - a.v.billingMs);
@@ -614,14 +629,16 @@ export function PatientOverview({ id }) {
   const grant = state.breakGlass.find(
     (b) => b.ref === id && b.by === state.session.name && b.expires > Date.now(),
   );
-  const full = state.insideNetwork || !!grant;
+  // Full only when the private details actually arrived; the Firestore rules decide that.
+  const full = hasDetails(state, id);
+  const canAsk = !state.insideNetwork && !grant;
   const agent = agencyName(state, e.agencyId);
   const visits = visitsOf(e);
 
   return (
     <Shell title="Patient overview" back tab="s.dash">
       <Intro title={e.name} sub={`${e.ref}, ${agent}`}>
-        {!full && (
+        {canAsk && (
           <button className="btn primary" onClick={() => nav('s.breakglass', { id })}>
             <Icon name="lock" size={16} /> Request more access
           </button>
@@ -645,10 +662,10 @@ export function PatientOverview({ id }) {
         <Card
           title="Patient details"
           sub={state.insideNetwork
-            ? 'Full record'
+            ? (full ? 'Full record' : 'Loading the full record…')
             : grant
               ? `Break-glass access active until ${new Date(grant.expires).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}. Your access is logged.`
-              : 'Restricted outside the clinic network. Your access is logged.'}
+              : 'Restricted outside the clinic network. These details are not sent to this device. Your access is logged.'}
         >
           {full ? (
             <Details
@@ -701,9 +718,25 @@ export function BreakGlass({ id }) {
     ? noteError(note, { min: LIMITS.otherNote.min, max: LIMITS.note.max, what: 'explanation' })
     : noteError(note, { what: 'supporting note' }));
 
-  const confirm = () => {
+  const [saving, setSaving] = useState(false);
+
+  const confirm = async () => {
+    if (saving) return undefined;
     if (active) return setError('Full access is already open for this record. Wait for it to end before asking again.');
     if (check()) return setError(check());
+    setSaving(true);
+    try {
+      // Saved in Firebase first: the Firestore rules release the details only while this grant runs.
+      await saveBreakGlass({ endorsementId: id, name: state.session.name, reason, note: note.trim(), minutes });
+    } catch (err) {
+      console.error('Break-glass request failed:', err);
+      setSaving(false);
+      if (err.code === 'permission-denied') {
+        dispatch({ type: 'logDenied', id, detail: 'Firebase refused a break-glass request' });
+        return setError('Firebase refused this request. Full access may already be open for this record; refresh the page to check.');
+      }
+      return setError('The request could not be saved. Check your connection and try again.');
+    }
     dispatch({ type: 'breakGlass', id, reason, note: note.trim() });
     toast(`Full access for ${minutes} minutes · admin notified`);
     return back();
@@ -730,7 +763,7 @@ export function BreakGlass({ id }) {
           )}
         </div>
         <div className="card-foot">
-          <button className="btn primary" disabled={active} onClick={confirm}>Confirm {minutes}-minute access</button>
+          <button className="btn primary" disabled={active || saving} onClick={confirm}>{saving ? 'Saving…' : `Confirm ${minutes}-minute access`}</button>
           <button className="btn" onClick={back}>Cancel</button>
         </div>
       </Card>

@@ -93,9 +93,11 @@ service cloud.firestore {
         && request.resource.data.patientCode ==
           "PT-" + endorsementId
         && request.resource.data.status == "Pending"
-        && request.resource.data.createdAt == request.time;
+        && request.resource.data.createdAt == request.time
+        // Private details go in patientDetails, never in this record.
+        && !request.resource.data.keys().hasAny(privateFields());
 
-      // Clinic users can view all endorsements.
+      // Clinic users can view all endorsements (limited fields only).
       // Agencies can view their own endorsements.
       allow get, list: if isClinicUser()
         || (
@@ -128,6 +130,108 @@ service cloud.firestore {
           request.resource.data.timeline.size() - 1
         ].label == "Accepted";
 
+      allow delete: if false;
+    }
+
+    // ==============================
+    // CLINIC NETWORK AND LIMITED VIEW
+    // Full patient details live in patientDetails/{endorsement id}.
+    // Clinic staff receive them only while on the clinic network (a network pass that
+    // only the server, api/network.js, can write) or while break-glass access runs.
+    // ==============================
+
+    function privateFields() {
+      return ["contact", "email", "birthday", "age", "address",
+        "position", "vessel", "repatriation", "referral"];
+    }
+
+    function hasNetworkPass() {
+      return exists(/databases/$(database)/documents/networkPasses/$(request.auth.uid))
+        && get(/databases/$(database)/documents/networkPasses/$(request.auth.uid))
+          .data.expiresAt > request.time;
+    }
+
+    function hasBreakGlassFor(endorsementId) {
+      return exists(/databases/$(database)/documents/breakGlass/$(request.auth.uid + "_" + endorsementId))
+        && get(/databases/$(database)/documents/breakGlass/$(request.auth.uid + "_" + endorsementId))
+          .data.expiresAt > request.time;
+    }
+
+    function breakGlassMinutes() {
+      return exists(/databases/$(database)/documents/settings/accessPolicy)
+        ? get(/databases/$(database)/documents/settings/accessPolicy).data.breakGlassMinutes
+        : 30;
+    }
+
+    match /patientDetails/{endorsementId} {
+      // Saved by the agency together with the endorsement (same batch).
+      allow create: if isApprovedAgency()
+        && request.resource.data.agencyId == request.auth.uid
+        && request.resource.data.keys().hasOnly(privateFields().concat(["agencyId"]))
+        && getAfter(
+          /databases/$(database)/documents/endorsements/$(endorsementId)
+        ).data.agencyId == request.auth.uid;
+
+      allow get: if isAdmin()
+        || (isApprovedAgency() && resource.data.agencyId == request.auth.uid)
+        || (isClinicUser() && (hasNetworkPass() || hasBreakGlassFor(endorsementId)));
+
+      allow list: if isAdmin()
+        || (isApprovedAgency() && resource.data.agencyId == request.auth.uid)
+        || (isClinicUser() && hasNetworkPass());
+
+      allow update, delete: if false;
+    }
+
+    // Written only by the server (the Admin SDK skips these rules).
+    match /networkPasses/{userId} {
+      allow get: if signedIn() && request.auth.uid == userId;
+      allow list, create, update, delete: if false;
+    }
+
+    // Access policy: the clinic network, break-glass length and idle sign-out.
+    match /settings/{settingId} {
+      allow get: if isClinicUser();
+      allow list: if false;
+      allow create, update: if isAdmin()
+        && settingId == "accessPolicy"
+        && request.resource.data.keys().hasOnly([
+          "network", "breakGlassMinutes", "autoLogoutMinutes", "updatedBy", "updatedAt"
+        ])
+        && request.resource.data.network is string
+        && request.resource.data.network.size() > 0
+        && request.resource.data.network.size() <= 200
+        && request.resource.data.breakGlassMinutes in [15, 30, 60]
+        && request.resource.data.autoLogoutMinutes in [5, 10, 15, 30]
+        && request.resource.data.updatedBy == request.auth.uid
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // Break-glass: one record per staff member and endorsement, reused once it has ended.
+    function breakGlassIsValid(grantId) {
+      let d = request.resource.data;
+      return isClinicUser()
+        && d.keys().hasOnly(["endorsementId", "uid", "name", "reason", "note", "createdAt", "expiresAt"])
+        && d.uid == request.auth.uid
+        && grantId == request.auth.uid + "_" + d.endorsementId
+        && d.endorsementId is string
+        && exists(/databases/$(database)/documents/endorsements/$(d.endorsementId))
+        && d.name is string && d.name.size() <= 200
+        && d.reason is string && d.reason.size() > 0 && d.reason.size() <= 60
+        && d.note is string && d.note.size() > 0 && d.note.size() <= 1000
+        && d.createdAt == request.time
+        && d.expiresAt is timestamp
+        && d.expiresAt > request.time
+        // The policy's length, plus two minutes for a device clock that runs a little fast.
+        && d.expiresAt <= request.time + duration.value(breakGlassMinutes() * 60 + 120, "s");
+    }
+
+    match /breakGlass/{grantId} {
+      // Staff read their own grants (to pick them up again after a page refresh).
+      allow get, list: if isAdmin() || (signedIn() && resource.data.uid == request.auth.uid);
+      allow create: if breakGlassIsValid(grantId);
+      allow update: if breakGlassIsValid(grantId) && resource.data.expiresAt <= request.time;
       allow delete: if false;
     }
 
