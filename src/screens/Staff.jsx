@@ -18,7 +18,8 @@ import {
   daysLeft,
   visitsOf,
   hasBreakGlass,
-  hasDetails
+  hasDetails,
+  myGrants
 } from '../store.jsx';
 
 import {
@@ -626,12 +627,11 @@ export function PatientOverview({ id }) {
   const { state } = useStore();
   const { nav } = useNav();
   const e = state.endorsements.find((x) => x.ref === id);
-  const grant = state.breakGlass.find(
-    (b) => b.ref === id && b.by === state.session.name && b.expires > Date.now(),
-  );
+  const grant = myGrants(state).find((b) => b.ref === id);
   // Full only when the private details actually arrived; the Firestore rules decide that.
   const full = hasDetails(state, id);
-  const canAsk = !state.insideNetwork && !grant;
+  const withdrawn = !state.breakGlassAllowed;
+  const canAsk = !state.insideNetwork && !grant && !withdrawn;
   const agent = agencyName(state, e.agencyId);
   const visits = visitsOf(e);
 
@@ -646,6 +646,9 @@ export function PatientOverview({ id }) {
         <button className="btn" onClick={() => nav('timeline', { id })}>Timeline</button>
       </Intro>
       <NetBanner />
+      {withdrawn && !state.insideNetwork && (
+        <Note tone="red" icon="lock">The clinic admin has withdrawn your break-glass access. Full details open only on the clinic network.</Note>
+      )}
       <div className="split aside-left">
         <Card title="Case" action={<Chip>{e.status}</Chip>}>
           <Details
@@ -712,6 +715,7 @@ export function BreakGlass({ id }) {
 
   const other = reason === 'Other';
   const active = hasBreakGlass(state, id); // full access is already open for this record
+  const withdrawn = !state.breakGlassAllowed;
 
   // "Other" says nothing by itself, so the note has to explain it.
   const check = () => (other
@@ -722,6 +726,7 @@ export function BreakGlass({ id }) {
 
   const confirm = async () => {
     if (saving) return undefined;
+    if (withdrawn) return setError('The clinic admin has withdrawn your break-glass access.');
     if (active) return setError('Full access is already open for this record. Wait for it to end before asking again.');
     if (check()) return setError(check());
     setSaving(true);
@@ -733,7 +738,7 @@ export function BreakGlass({ id }) {
       setSaving(false);
       if (err.code === 'permission-denied') {
         dispatch({ type: 'logDenied', id, detail: 'Firebase refused a break-glass request' });
-        return setError('Firebase refused this request. Full access may already be open for this record; refresh the page to check.');
+        return setError('Firebase refused this request. Your break-glass access may have been withdrawn, or full access is already open for this record.');
       }
       return setError('The request could not be saved. Check your connection and try again.');
     }
@@ -748,8 +753,11 @@ export function BreakGlass({ id }) {
       <Card className="narrow">
         <div className="form">
           <Note tone="amber" icon="alert" title={`Access lasts ${minutes} minutes`}>
-            The request is logged and the clinic admin is notified.
+            The request is logged and the clinic admin is alerted straight away. Access also ends when you sign out or are signed out for inactivity.
           </Note>
+          {withdrawn && (
+            <Note tone="red" icon="lock">The clinic admin has withdrawn your break-glass access, so this request cannot be made.</Note>
+          )}
           <Field label="Reason *">
             <Select value={reason} onChange={setReason} options={REASONS} />
           </Field>
@@ -763,7 +771,7 @@ export function BreakGlass({ id }) {
           )}
         </div>
         <div className="card-foot">
-          <button className="btn primary" disabled={active || saving} onClick={confirm}>{saving ? 'Saving…' : `Confirm ${minutes}-minute access`}</button>
+          <button className="btn primary" disabled={active || saving || withdrawn} onClick={confirm}>{saving ? 'Saving…' : `Confirm ${minutes}-minute access`}</button>
           <button className="btn" onClick={back}>Cancel</button>
         </div>
       </Card>

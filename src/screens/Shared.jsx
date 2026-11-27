@@ -181,7 +181,7 @@ export function Profile() {
   const { state, dispatch } = useStore();
   const { role, name, duty } = state.session;
 const signOut = async () => {
-  const success = await logoutUser(dispatch, role);
+  const success = await logoutUser(dispatch, state);
 
   if (!success) {
     alert("Unable to sign out. Please try again.");

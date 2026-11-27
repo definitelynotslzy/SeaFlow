@@ -15,7 +15,7 @@ import { Person } from './Shared.jsx';
 import { createClinicAccount } from '../createClinicAccount.js';
 import { useAgencyRequests } from "../useAgencyRequests.js";
 import { watchAuditLog } from "../auditLog.js";
-import { saveAccessPolicy } from "../accessSettings.js";
+import { saveAccessPolicy, reviewBreakGlass, setBreakGlassPrivilege } from "../accessSettings.js";
 import {
   LIMITS, nameError, usernameError, passwordError, confirmError, statusReasonError, noteError,
   networkError, normalizeNetwork, networkEntries, agencyKey, friendlyError,
@@ -35,6 +35,84 @@ function RequestRow({ a }) {
       </div>
       <button className="btn sm" onClick={() => nav('a.request', { id: a.id })}>Review details</button>
     </div>
+  );
+}
+
+/** "Open until 3:40 PM", "Ended: Signed out at 3:12 PM" or "Ended at its time limit". */
+function grantState(b) {
+  const time = (ms) => new Date(ms).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  if (b.expires > Date.now()) return `Open until ${time(b.expires)}.`;
+  if (b.endReason) return `Ended: ${b.endReason} at ${time(b.endedAt || b.expires)}.`;
+  return 'Ended at its time limit.';
+}
+
+/** Offers desktop notifications, so break-glass alerts show even when SeaFlow is in a background tab. */
+function DesktopAlerts() {
+  const supported = typeof window !== 'undefined' && 'Notification' in window;
+  const [permission, setPermission] = useState(supported ? Notification.permission : 'unsupported');
+  if (permission !== 'default') return null;
+  const ask = async () => {
+    try {
+      setPermission(await Notification.requestPermission());
+    } catch {
+      setPermission('denied');
+    }
+  };
+  return (
+    <Note tone="teal" icon="bell">
+      New break-glass requests appear here straight away. To also get them while SeaFlow is in a background tab,{' '}
+      <button className="link" onClick={ask}>turn on desktop notifications</button>.
+    </Note>
+  );
+}
+
+/**
+ * Withdraw a staff member's break-glass privilege (with a reason). Any access they have open
+ * ends at once, and the Firestore rules refuse new requests until it is restored.
+ */
+function WithdrawBreakGlass({ user, onClose, onDone }) {
+  const { dispatch } = useStore();
+  const { toast } = useNav();
+  const [why, setWhy] = useState('');
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const confirm = async () => {
+    if (saving) return undefined;
+    if (statusReasonError(why)) return setError(statusReasonError(why));
+    setSaving(true);
+    try {
+      const ended = await setBreakGlassPrivilege(user.id, false, why.trim().replace(/\s+/g, ' '));
+      dispatch({ type: 'logAction', action: 'Withdrew break-glass', note: `${user.name} · Reason: ${why.trim()}` });
+      ended.forEach((ref) => dispatch({ type: 'logAction', action: 'Ended break-glass', id: ref, note: `${user.name} · Privilege withdrawn` }));
+      toast(ended.length ? `Break-glass withdrawn from ${user.name}; open access ended` : `Break-glass withdrawn from ${user.name}`);
+      onDone?.();
+      return onClose();
+    } catch (err) {
+      console.error('Withdraw break-glass failed:', err);
+      setSaving(false);
+      if (err.code === 'permission-denied') dispatch({ type: 'logDenied', detail: 'Firebase refused to withdraw a break-glass privilege' });
+      return setError(friendlyError(err, 'Unable to withdraw the privilege. Try again.'));
+    }
+  };
+
+  return (
+    <Modal
+      title={`Withdraw break-glass from ${user.name}?`}
+      sub="Any full access they have open ends now, and they cannot request it again until you restore it. They can still sign in and use the limited view."
+      onClose={onClose}
+      footer={(
+        <>
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button className="btn danger" disabled={saving} onClick={confirm}>{saving ? 'Withdrawing…' : 'Withdraw break-glass'}</button>
+        </>
+      )}
+    >
+      <Field label="Reason *" error={error}>
+        <textarea value={why} maxLength={LIMITS.statusReason.max} placeholder="e.g. Opened records without a valid reason"
+          onChange={(ev) => { setWhy(ev.target.value); setError(''); }} />
+      </Field>
+    </Modal>
   );
 }
 
@@ -74,6 +152,7 @@ const requests = firebaseRequests.filter(
           sub="Break-glass requests waiting for your review."
           action={<button className="link" onClick={() => reset('a.audit')}>Open audit log</button>}
         >
+          <DesktopAlerts />
           {bgNew.length === 0 ? (
             <Empty text="No break-glass requests are waiting for review." icon="lock" />
           ) : (
@@ -82,7 +161,7 @@ const requests = firebaseRequests.filter(
                 <div className="row" key={b.id}>
                   <div>
                     <div className="strong">{b.by} opened {b.ref}</div>
-                    <div className="meta">{stamp(b.ms)}, {b.minutes}-minute window. {b.reason}</div>
+                    <div className="meta">{stamp(b.ms)}, {b.minutes}-minute window. {b.reason}. {grantState(b)}</div>
                   </div>
                   <button className="btn sm" onClick={() => nav('a.bg', { id: b.id })}>Review</button>
                 </div>
@@ -152,7 +231,10 @@ useEffect(() => {
             ? "Clinic Admin"
             : "Clinic Staff",
           status: data.status || "Active",
-          statusReason: data.statusReason || null
+          statusReason: data.statusReason || null,
+          // Break-glass privilege (staff only). Missing means allowed.
+          breakGlassAllowed: data.breakGlassAllowed !== false,
+          breakGlassNote: data.breakGlassNote || ""
         };
       });
 
@@ -286,6 +368,20 @@ const deactivate = async () => {
   }
 };
 
+const [withdrawing, setWithdrawing] = useState(null);
+
+const restoreBreakGlass = async (u) => {
+  try {
+    await setBreakGlassPrivilege(u.id, true, '');
+    dispatch({ type: 'logAction', action: 'Restored break-glass', note: u.name });
+    toast(`Break-glass restored for ${u.name}`);
+  } catch (error) {
+    if (error.code === 'permission-denied') dispatch({ type: 'logDenied', detail: 'Firebase refused to restore a break-glass privilege' });
+    console.error('Restore break-glass failed:', error);
+    toast('Unable to restore break-glass.');
+  }
+};
+
 const activate = async (u) => {
   try {
     await updateDoc(doc(db, "users", u.id), {
@@ -335,6 +431,9 @@ const activate = async (u) => {
         <>
           <Chip>{u.status}</Chip>
           {u.statusReason && <span className="meta">Reason for deactivation: {u.statusReason}</span>}
+          {u.role === 'Clinic Staff' && !u.breakGlassAllowed && (
+            <span className="meta">Break-glass withdrawn{u.breakGlassNote ? `: ${u.breakGlassNote}` : ''}</span>
+          )}
         </>
       ),
     },
@@ -343,6 +442,9 @@ const activate = async (u) => {
       cell: (u) => (
         <div className="actions">
           <button className="btn sm" disabled title="Not yet available">Reset password</button>
+          {u.role === 'Clinic Staff' && (u.breakGlassAllowed
+            ? <button className="btn sm" onClick={() => setWithdrawing(u)}>Withdraw break-glass</button>
+            : <button className="btn sm" onClick={() => restoreBreakGlass(u)}>Restore break-glass</button>)}
           {u.status === 'Active'
             ? <button className="btn sm danger" disabled={u.id === state.session.userId} onClick={() => open('deactivate', u)}>Deactivate</button>
             : <button className="btn sm" onClick={() => activate(u)}>Activate</button>}
@@ -429,6 +531,8 @@ const activate = async (u) => {
           </Field>
         </Modal>
       )}
+
+      {withdrawing && <WithdrawBreakGlass user={withdrawing} onClose={() => setWithdrawing(null)} />}
 
       {dialog?.type === 'deactivate' && (
         <Modal
@@ -1064,12 +1168,32 @@ export function BreakGlassReview({ id }) {
   const { state, dispatch } = useStore();
   const { back, toast } = useNav();
   const b = state.breakGlass.find((x) => x.id === id);
-  const [note, setNote] = useState(b.reviewNote || '');
+  const [note, setNote] = useState(b?.reviewNote || '');
   const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [withdrawing, setWithdrawing] = useState(false);
 
-  const finish = (status) => {
+  if (!b) {
+    return (
+      <Shell title="Break-glass review" back tab="a.overview">
+        <Empty text="Loading this request…" icon="lock" />
+      </Shell>
+    );
+  }
+
+  const finish = async (status) => {
+    if (saving) return undefined;
     if (status === 'Flagged' && noteError(note, { what: 'review note' })) return setError(noteError(note, { what: 'review note' }));
     if (note.trim().length > LIMITS.note.max) return setError(`Keep the note within ${LIMITS.note.max} characters.`);
+    setSaving(true);
+    try {
+      await reviewBreakGlass(b.id, status, note.trim());
+    } catch (err) {
+      console.error('Break-glass review failed:', err);
+      setSaving(false);
+      if (err.code === 'permission-denied') dispatch({ type: 'logDenied', id: b.ref, detail: 'Firebase refused a break-glass review' });
+      return setError(friendlyError(err, 'The review could not be saved. Try again.'));
+    }
     dispatch({ type: 'reviewBreakGlass', id, status, note: note.trim() });
     toast(status === 'Flagged' ? 'Flagged as inappropriate' : 'Marked as reviewed');
     return back();
@@ -1085,22 +1209,27 @@ export function BreakGlassReview({ id }) {
             items={[
               ['Requested by', `${b.by}, Clinic Staff`],
               ['When', `${stamp(b.ms)}, ${b.minutes}-minute window`],
+              ['Access', grantState(b)],
               ['Reason', b.reason],
               ['Records viewed in window', b.ref],
               ['Staff note', b.note],
             ]}
           />
+          <div className="card-foot">
+            <button className="btn danger" onClick={() => setWithdrawing(true)}>Withdraw {b.by}'s break-glass</button>
+          </div>
         </Card>
         <Card title="Your review">
           <Field label="Review note (required to flag)" error={error}>
             <textarea value={note} maxLength={LIMITS.note.max} placeholder="Say why this access was or was not justified" onChange={(ev) => { setNote(ev.target.value); setError(''); }} />
           </Field>
           <div className="card-foot">
-            <button className="btn primary" onClick={() => finish('Reviewed')}>Mark as reviewed</button>
-            <button className="btn danger" onClick={() => finish('Flagged')}>Flag as inappropriate</button>
+            <button className="btn primary" disabled={saving} onClick={() => finish('Reviewed')}>Mark as reviewed</button>
+            <button className="btn danger" disabled={saving} onClick={() => finish('Flagged')}>Flag as inappropriate</button>
           </div>
         </Card>
       </div>
+      {withdrawing && <WithdrawBreakGlass user={{ id: b.uid, name: b.by }} onClose={() => setWithdrawing(false)} />}
     </Shell>
   );
 }
@@ -1108,6 +1237,7 @@ export function BreakGlassReview({ id }) {
 const ACTION_TONE = {
   'Accepted endorsement': 'green', 'Created account': 'green', 'Activated account': 'green',
   'Break-glass': 'red', 'Flagged break-glass': 'red', 'Deactivated account': 'red',
+  'Withdrew break-glass': 'red', 'Ended break-glass': 'slate', 'Restored break-glass': 'green',
   'Agency suspended': 'red', 'Agency rejected': 'red',
   'Submitted medical report': 'teal', 'Submitted billing statement': 'teal',
   'Signed in': 'slate', 'Viewed record': 'slate', 'Viewed timeline': 'slate', 'Viewed endorsement': 'slate',

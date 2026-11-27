@@ -112,7 +112,7 @@ export function Shell({ title, back, tab, wide, children }) {
 
 
 const handleLogout = async () => {
-  const success = await logoutUser(dispatch, session?.role);
+  const success = await logoutUser(dispatch, state);
 
   if (!success) {
     alert("Unable to log out. Please try again.");
