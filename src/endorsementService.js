@@ -1,12 +1,13 @@
 import {
   doc,
   collection,
-  setDoc,
+  writeBatch,
   serverTimestamp,
 } from "firebase/firestore";
 
 import { auth, db } from "./firebase.js";
 import { endorsementErrors, cleanEndorsement } from "./validators.js";
+import { splitEndorsement } from "./patientDetails.js";
 
 export async function createEndorsement(form) {
   const user = auth.currentUser;
@@ -43,7 +44,13 @@ export async function createEndorsement(form) {
     createdAt: serverTimestamp(),
   };
 
-  await setDoc(endorsementRef, endorsement);
+  // The private details go in their own record, which the rules only release to this agency,
+  // the clinic admin, and clinic staff on the clinic network or with break-glass access.
+  const { open, details } = splitEndorsement(endorsement);
+  const batch = writeBatch(db);
+  batch.set(endorsementRef, open);
+  batch.set(doc(db, "patientDetails", endorsementRef.id), { ...details, agencyId: user.uid });
+  await batch.commit();
 
   return {
     ...endorsement,

@@ -387,6 +387,26 @@ function isNetworkEntry(entry) {
   return /^\d{1,3}$/.test(prefix) && Number(prefix) <= (v4 ? 32 : 128);
 }
 
+const v4Number = (text) => text.split('.').reduce((n, p) => n * 256 + Number(p), 0);
+
+// Addresses a router hands out inside a building or phone hotspot. Websites never see these,
+// so they can never be the clinic's public address.
+const PRIVATE_V4 = [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.168.0.0', 16]];
+
+function isPrivateEntry(address) {
+  if (isIPv4(address)) {
+    const n = v4Number(address);
+    return PRIVATE_V4.some(([base, bits]) => Math.floor(n / 2 ** (32 - bits)) === Math.floor(v4Number(base) / 2 ** (32 - bits)));
+  }
+  const a = address.toLowerCase();
+  return a === '::' || a === '::1' || /^f[cd]/.test(a) || /^fe[89ab]/.test(a);
+}
+
+// The widest range allowed. Anything wider can take in other customers of the same internet
+// provider, including people on mobile data, who would then count as inside the clinic.
+const WIDEST_V4 = 24;
+const WIDEST_V6 = 48;
+
 /** "203.0.113.24, 203.0.113.0/24" becomes ['203.0.113.24', '203.0.113.0/24']. */
 export const networkEntries = (value) =>
   String(value ?? '').split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
@@ -399,6 +419,16 @@ export function networkError(value) {
   if (String(value).length > LIMITS.network.max) return `Keep this within ${LIMITS.network.max} characters.`;
   const bad = entries.find((entry) => !isNetworkEntry(entry));
   if (bad) return `"${bad}" is not a valid IP address or range. Example: 203.0.113.24 or 203.0.113.0/24.`;
+  const inner = entries.find((entry) => isPrivateEntry(entry.split('/')[0]));
+  if (inner) return `"${inner}" is a private address used inside a building, not the clinic's public IP address. Use the address shown below while on the clinic Wi‑Fi.`;
+  const wide = entries.find((entry) => {
+    const [address, prefix] = entry.split('/');
+    return prefix !== undefined && Number(prefix) < (isIPv4(address) ? WIDEST_V4 : WIDEST_V6);
+  });
+  if (wide) {
+    const limit = isIPv4(wide.split('/')[0]) ? WIDEST_V4 : WIDEST_V6;
+    return `"${wide}" is too wide a range and could include people outside the clinic. Use /${limit} or narrower.`;
+  }
   return '';
 }
 

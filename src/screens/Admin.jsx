@@ -15,9 +15,10 @@ import { Person } from './Shared.jsx';
 import { createClinicAccount } from '../createClinicAccount.js';
 import { useAgencyRequests } from "../useAgencyRequests.js";
 import { watchAuditLog } from "../auditLog.js";
+import { saveAccessPolicy } from "../accessSettings.js";
 import {
   LIMITS, nameError, usernameError, passwordError, confirmError, statusReasonError, noteError,
-  networkError, normalizeNetwork, agencyKey, friendlyError,
+  networkError, normalizeNetwork, networkEntries, agencyKey, friendlyError,
 } from '../validators.js';
 
 
@@ -591,19 +592,46 @@ function Policy() {
   const { toast } = useNav();
   const [p, setP] = useState(state.policy);
   const [error, setError] = useState('');
+  const [saveError, setSaveError] = useState('');
   const [confirming, setConfirming] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  // The saved policy loads a moment after sign-in; show it once it arrives, unless the admin is already editing.
+  const [touched, setTouched] = useState(false);
+  useEffect(() => {
+    if (!touched) setP(state.policy);
+  }, [state.policy, touched]);
+  const edit = (next) => { setTouched(true); setP(next); };
 
   const networkChanged = normalizeNetwork(p.network) !== normalizeNetwork(state.policy.network);
+  const { ip, status } = state.network;
+  const ipListed = ip && networkEntries(p.network).includes(ip);
 
-  const save = () => {
+  const save = async () => {
+    if (saving) return undefined;
     const problem = networkError(p.network);
     if (problem) return setError(problem);
     // A wrong network locks every staff member out of the full view, so a change is confirmed first.
     if (networkChanged && !confirming) return setConfirming(true);
     const policy = { ...p, network: normalizeNetwork(p.network) };
+    setSaving(true);
+    setSaveError('');
+    try {
+      // Saved in Firebase: the server reads it to decide who is on the clinic network.
+      await saveAccessPolicy(policy);
+    } catch (err) {
+      console.error('Unable to save the access policy:', err);
+      setSaving(false);
+      if (err.code === 'permission-denied') dispatch({ type: 'logDenied', detail: 'Firebase refused an access policy change' });
+      return setSaveError(friendlyError(err, 'The policy could not be saved. Try again.'));
+    }
     dispatch({ type: 'savePolicy', policy });
     setP(policy);
+    setTouched(false);
+    setSaving(false);
     setConfirming(false);
+    // Check again straight away so the new network takes effect for this admin too.
+    dispatch({ type: 'recheckNetwork' });
     return toast('Access policy saved');
   };
 
@@ -615,9 +643,24 @@ function Policy() {
           <Field label="Clinic network (public IP or range) *" error={error}
             hint="Staff on this network see full patient details. Separate several entries with commas, e.g. 203.0.113.24, 203.0.113.0/24.">
             <input type="text" value={p.network} maxLength={LIMITS.network.max} autoComplete="off" spellCheck={false}
-              onChange={(ev) => { setP({ ...p, network: ev.target.value }); setError(''); setConfirming(false); }}
+              onChange={(ev) => { edit({ ...p, network: ev.target.value }); setError(''); setConfirming(false); }}
               onBlur={() => setError(networkError(p.network))} />
           </Field>
+          <Note tone={status === 'inside' ? 'teal' : 'amber'} icon={status === 'inside' ? 'wifi' : 'alert'}>
+            {ip
+              ? <>This device's public IP address is <span style={{ fontWeight: 600 }}>{ip}</span>{status === 'inside' ? ', which is on the clinic network.' : ', which is not on the clinic network.'}</>
+              : status === 'error'
+                ? 'This device\'s public IP address could not be checked.'
+                : 'Checking this device\'s public IP address…'}
+            {' '}Set this while connected to the clinic Wi‑Fi. Mobile data, home Wi‑Fi, VPNs and proxies always count as outside.
+            {ip && !ipListed && (
+              <div style={{ marginTop: 8 }}>
+                <button className="btn sm" onMouseDown={(ev) => ev.preventDefault()} onClick={() => { edit({ ...p, network: normalizeNetwork([p.network, ip].filter(Boolean).join(', ')) }); setError(''); setConfirming(false); }}>
+                  Add this address
+                </button>
+              </div>
+            )}
+          </Note>
           {confirming && (
             <Note tone="amber" icon="alert" title="Check before saving">
               You are changing the clinic network. If the new value does not include the clinic's current public IP
@@ -628,21 +671,22 @@ function Policy() {
             <Field label="Break-glass access duration">
               <Select
                 value={p.breakGlassMinutes}
-                onChange={(breakGlassMinutes) => setP({ ...p, breakGlassMinutes })}
+                onChange={(breakGlassMinutes) => edit({ ...p, breakGlassMinutes })}
                 options={[15, 30, 60].map((m) => ({ value: m, label: `${m} minutes` }))}
               />
             </Field>
             <Field label="Auto-logout after inactivity">
               <Select
                 value={p.autoLogoutMinutes}
-                onChange={(autoLogoutMinutes) => setP({ ...p, autoLogoutMinutes })}
+                onChange={(autoLogoutMinutes) => edit({ ...p, autoLogoutMinutes })}
                 options={[5, 10, 15, 30].map((m) => ({ value: m, label: `${m} minutes` }))}
               />
             </Field>
           </div>
         </div>
+        {saveError && <Note tone="red" icon="alert">{saveError}</Note>}
         <div className="card-foot">
-          <button className="btn primary" onClick={save}>Save policy</button>
+          <button className="btn primary" disabled={saving} onClick={save}>{saving ? 'Saving…' : 'Save policy'}</button>
         </div>
       </Card>
     </>

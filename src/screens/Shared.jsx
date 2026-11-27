@@ -2,18 +2,21 @@
 import { useState, useEffect, useRef } from 'react';
 import { doc, getDoc, updateDoc } from 'firebase/firestore';
 import { db } from '../firebase.js';
-import { useStore, myAlerts, stamp, fmtDate, isClosed, visitsOf, agencyName, hasBreakGlass, ROLE_LABEL } from '../store.jsx';
+import { useStore, myAlerts, stamp, fmtDate, isClosed, visitsOf, agencyName, hasDetails, ROLE_LABEL } from '../store.jsx';
 import { Shell, Intro, Card, Chip, Field, Details, FileRow, Note, Empty, Icon, Modal, useNav } from '../ui.jsx';
 import { logoutUser } from "../logout.js";
 import { LIMITS, PROFILE_RULES, profileErrors, cleanProfile, clean, friendlyError } from '../validators.js';
 
+
+/** "Position, Vessel", or a note when those details were not sent to this device. */
+export const jobLine = (e) => [e.position, e.vessel].filter(Boolean).join(', ') || 'Details restricted';
 
 /** Seafarer name with position and vessel underneath (first column of most tables). */
 export function Person({ e }) {
   return (
     <>
       <span className="strong">{e.name}</span>
-      <span className="meta">{e.position}, {e.vessel}</span>
+      <span className="meta">{jobLine(e)}</span>
     </>
   );
 }
@@ -53,8 +56,9 @@ export function Timeline({ id }) {
   const closed = isClosed(e);
   const visits = visitsOf(e);
   const lastVisit = visits[visits.length - 1];
-  // Clinic staff outside the clinic network cannot open files unless break-glass access is active.
-  const locked = role === 'staff' && !state.insideNetwork && !hasBreakGlass(state, id);
+  // Clinic staff outside the clinic network do not receive the private details (or the file)
+  // unless break-glass access is active.
+  const locked = role === 'staff' && !hasDetails(state, id);
 
   const request = () => {
     dispatch({ type: 'requestUpdate', id });
@@ -68,7 +72,7 @@ export function Timeline({ id }) {
           <Card>
             <div className="over">{e.ref}</div>
             <div className="card-name">{e.name}</div>
-            <div className="meta">{e.position}, {e.vessel}</div>
+            <div className="meta">{jobLine(e)}</div>
             <div className="chips" style={{ margin: '12px 0 16px' }}>
               <Chip>{e.status}</Chip>
               {e.cashBasis && <Chip>Cash basis</Chip>}
